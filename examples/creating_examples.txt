@@ -1,0 +1,96 @@
+SYSTEM_PROMPT = """You are generating compact, high-quality in-context learning demonstrations for mathematical reasoning tasks.
+
+Hard constraints:
+- The solution MUST be correct and logically sound.
+- Use ONLY the specified reasoning style. Do NOT mix strategies.
+- Keep the solution concise: include only the key steps needed to justify the result. Avoid verbose explanation.
+- Prefer symbolic work (equations/inequalities) over narration.
+- Do NOT include meta-commentary, self-reflection, alternative approaches, or references to “token limits”.
+
+Step granularity (important):
+- Include the critical lemmas/transformations that make the solution work (the “why” of the method), but omit routine algebra/arithmetic that can be done in one line.
+- Do not skip nontrivial jumps. If a step is not obvious, add a short justification (≤ 1 sentence) or a brief equation.
+- When introducing variables, define them once and reuse them consistently.
+
+Formatting:
+- Use a clean, minimal structure appropriate to the method (e.g., numbered steps for decomposition, explicit “Case 1/2/…” for case analysis).
+- No restating the problem.
+- End with exactly one line: Final Answer: \\boxed{}.
+"""
+
+# Method 1
+
+Solve the following problem using a purely algebraic approach.
+
+Constraints:
+- Introduce variables explicitly.
+- Translate the problem into equations.
+- Manipulate equations step by step.
+- Avoid case analysis, diagrams, or intuitive arguments.
+
+Problem:
+"Six points $ A, B, C, D, E, $ and $ F $ lie in a straight line in that order. Suppose that $ G $ is a point not on the line and that $ AC = 26 $, $ BD = 22 $, $ CE = 31 $, $ DF = 33 $, $ AF = 73 $, $ CG = 40 $, and $ DG = 30 $. Find the area of $ \\triangle BGE $."
+
+# Expected Answer: 468
+
+# Method 2
+
+Solve the following problem using a step-by-step decomposition strategy.
+
+Constraints:
+- Explicitly label steps (Step 1, Step 2, etc.).
+- Each step should solve a clear subproblem.
+- Maintain a logical progression toward the final answer.
+- Do not introduce alternative solution paths.
+
+Problem:
+"Circle $\\omega_1$ with radius 6 centered at point $A$ is internally tangent at point $B$ to circle $\\omega_2$ with radius 15. Points $C$ and $D$ lie on $\\omega_2$ such that $\\overline{BC}$ is a diameter of $\\omega_2$ and $\\overline{BC} \\perp \\overline{AD}$. The rectangle $EFGH$ is inscribed in $\\omega_1$ such that $\\overline{EF} \\perp \\overline{BC}$, $C$ is closer to $\\overline{GH}$ than to $\\overline{EF}$, and $D$ is closer to $\\overline{FG}$ than to $\\overline{EH}$, as shown. Triangles $\\triangle DGF$ and $\\triangle CHG$ have equal areas. The area of rectangle $EFGH$ is $\\frac{m}{n}$, where $m$ and $n$ are relatively prime positive integers. Find $m + n$."
+
+# Expected Answer: 293
+
+# Method 3
+
+Solve the following problem using case analysis.
+
+Constraints:
+- Explicitly state all cases being considered.
+- Justify why the cases cover all possibilities.
+- Solve each case independently.
+- Combine results logically at the end.
+- Do not use algebraic shortcuts unless required inside a case.
+
+Problem:
+"Four unit squares form a $2 \\times 2$ grid. Each of the 12 unit line segments forming the sides of the squares is colored either red or blue in such a way that each unit square has 2 red sides and 2 blue sides. Find the number of such colorings."
+
+# Expected Answer: 82
+
+# Method 4
+
+Solve the following problem using a proof-by-contradiction or constructive reasoning approach.
+
+Constraints:
+- Begin by assuming the opposite of the desired conclusion or by constructing a hypothetical object.
+- Derive logical consequences step by step.
+- Identify a contradiction or impossibility.
+- Conclude rigorously.
+
+Problem:
+"Let $k$ be real numbers such that the system $|25+20i-z|=5$ and $|z-4-k|=|z-3i-k|$ has exactly one complex solution $z$. The sum of all possible values of $k$ can be written as $\\frac{m}{n}$, where $m$ and $n$ are relatively prime positive integers. Find $m+n$. Here $i=\\sqrt{-1}$."
+
+# Expected Answer: 77
+
+# Method 5
+
+Solve the following problem using analogical or reduction-based reasoning.
+
+Constraints:
+- First solve a simpler or special case of the problem.
+- Clearly explain how the simpler case informs the general case.
+- Extend the reasoning to the full problem.
+- Avoid direct brute-force computation.
+
+Problem:
+"Let the sequence of rationals $ x_1, x_2, \\ldots $ be defined such that $ x_1 = \\frac{25}{11} $ and\n$ x_{k+1} = \\frac{1}{3} \\left( x_k + \\frac{1}{x_k} - 1 \\right). $\n$ x_{2025} $ can be expressed as $ \\frac{m}{n} $ for relatively prime positive integers $ m $ and $ n $. Find the remainder when $ m + n $ is divided by 1000."
+
+# Expected Answer: 248
+

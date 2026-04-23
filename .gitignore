@@ -1,0 +1,48 @@
+# wandb 日志（体积大，不上传）
+wandb/
+
+# Python
+__pycache__/
+*.py[cod]
+*$py.class
+*.so
+.Python
+*.egg-info/
+.eggs/
+build/
+dist/
+*.egg
+
+# 虚拟环境
+.venv/
+venv/
+env/
+ENV/
+
+# IDE
+.idea/
+.vscode/
+*.swp
+*.swo
+
+# 系统文件
+.DS_Store
+Thumbs.db
+
+# 日志与输出
+*.log
+logs/
+outputs/
+checkpoints/
+ckpts/
+output/
+
+# Jupyter
+.ipynb_checkpoints/
+
+# 其他常见大文件目录
+data/
+datasets/
+*.pt
+*.bin
+*.safetensors
