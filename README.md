@@ -20,8 +20,6 @@ Instead of just throwing more compute at logit-space exploration (e.g., higher t
   <img src="assets/figure1_overview.png" width="85%" alt="LoPE Overview"/>
 </p>
 
-> **Figure 1.** During the standard rollout phase, if all *G* responses fail, LoPE prepends a Lorem Ipsum sequence to the prompt and resamples *G′* responses. Successful responses are regrouped with the original failed ones to form a mixed batch of size *G* for policy update.
-
 ---
 
 ## ✨ Key Findings
@@ -35,7 +33,7 @@ Instead of just throwing more compute at logit-space exploration (e.g., higher t
   <img src="assets/figure2_venn.png" width="85%" alt="Venn Diagram of Solved Questions"/>
 </p>
 
-> **Figure 2.** Venn diagrams of questions successfully resolved (Pass@8) by naive prompting, high-temperature sampling, and Lorem perturbation. LoPE unlocks reasoning paths that pure logit-space methods cannot reach.
+> Venn diagrams of questions successfully resolved (Pass@8) by naive prompting, high-temperature sampling, and Lorem perturbation. LoPE unlocks reasoning paths that pure logit-space methods cannot reach.
 
 ---
 
