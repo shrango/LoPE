@@ -195,11 +195,10 @@ def compute_grpo_outcome_advantage(
         eps: `(float)`
             epsilon value to avoid division by zero
         all_rollout_scores_per_uid: `(Optional[dict])`
-            Optional mapping ``uid -> 1D array/tensor of scalar rewards`` containing
-            the *full* rollout scores (including those that were generated but not
-            kept in the batch, e.g. the 8 base + 24 ICL rewards for ICL-fallback
-            prompts). 如果某个 uid 存在于这个 dict 中，就用这一组完整的 scores 计算
-            mean/std 做归一化；否则退回到默认的 in-batch 归一化。
+            Only passed when ``algorithm.advantage_shaping`` is enabled in the trainer.
+            Mapping ``uid -> 1D rewards`` for full rollouts (e.g. base n + ICL rollouts).
+            If a uid is present, mean/std for GRPO use this vector; otherwise in-batch
+            scores only (standard GRPO).
 
     Returns:
         advantages: `(torch.Tensor)`
@@ -217,8 +216,7 @@ def compute_grpo_outcome_advantage(
         id2score[index[i]].append(scores[i])
 
     for idx in id2score:
-        # 优先使用"完整 rollout scores"（fallback prompt: base 8 + ICL 24 = 32 条）
-        # 否则退回到 in-batch 的 n 条 scores（默认 GRPO 行为）
+        # advantage_shaping 时 trainer 传入 all_rollout_scores_per_uid；否则为 None，仅用 batch 内 scores
         full_scores = None
         if all_rollout_scores_per_uid is not None and idx in all_rollout_scores_per_uid:
             raw = all_rollout_scores_per_uid[idx]

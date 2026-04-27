@@ -40,6 +40,137 @@ try:
 except ImportError:
     FakerFactory = None
 
+try:
+    import markovify as markovify_module
+except ImportError:
+    markovify_module = None
+
+_MARKOVIFY_MODEL_CACHE: dict[str, Any] = {}
+_RANDOM_NATURAL_LANGUAGE_CACHE: dict[str, list[str]] = {}
+_LA_WORD_POOL_CACHE: dict[tuple, tuple[str, ...]] = {}
+
+
+def _load_markovify_model(path: str):
+    """加载并缓存 markovify.Text 模型（同一进程内每个 path 只加载一次）。
+
+    期望 JSON 为 ``markovify.Text.to_json()`` 的完整导出（含 ``state_size``/``chain``/``parsed_sentences``）。
+    """
+    if markovify_module is None:
+        raise ImportError(
+            "use_markovify=True requires the `markovify` package. Install via: pip install markovify"
+        )
+    if not path or not os.path.isfile(path):
+        raise FileNotFoundError(f"markovify_model_path not found: {path}")
+    cached = _MARKOVIFY_MODEL_CACHE.get(path)
+    if cached is not None:
+        return cached
+    with open(path, "r", encoding="utf-8") as f:
+        model_json = f.read()
+    model = markovify_module.Text.from_json(model_json)
+    _MARKOVIFY_MODEL_CACHE[path] = model
+    return model
+
+
+def _load_random_natural_language_sentences(path: str) -> list[str]:
+    """加载 JSONL 单语语料，**整段**保留 ``text`` 字段，缓存为列表（每个进程 + path 只加载一次）。
+
+    设计假设：JSONL 在抽取阶段已按词数（如 100-300）筛过、每行的 ``text`` 即一段完整自然语言文本，
+    本函数不做切句、不做长度过滤，直接整段 strip 后入池，使用时随机挑一行整体作为 system 前缀。
+    """
+    if not path or not os.path.isfile(path):
+        raise FileNotFoundError(f"random_natural_language_corpus_path not found: {path}")
+    cached = _RANDOM_NATURAL_LANGUAGE_CACHE.get(path)
+    if cached is not None:
+        return cached
+    texts: list[str] = []
+    with open(path, "r", encoding="utf-8") as f:
+        for line in f:
+            line = line.strip()
+            if not line:
+                continue
+            try:
+                obj = json.loads(line)
+            except json.JSONDecodeError:
+                continue
+            text = obj.get("text") if isinstance(obj, dict) else None
+            if not isinstance(text, str):
+                continue
+            text = text.strip()
+            if not text:
+                continue
+            texts.append(text)
+    if not texts:
+        raise ValueError(
+            f"No usable text records found in random_natural_language corpus: {path}"
+        )
+    _RANDOM_NATURAL_LANGUAGE_CACHE[path] = texts
+    return texts
+
+
+def _load_la_word_pool(
+    path: str,
+    weighted: bool = False,
+    weighted_target_size: int = 1000,
+) -> tuple[str, ...]:
+    """加载 la 高频词 TSV（rank\\tword\\tcount）并构建 lorem 可用的 pool。
+
+    * 等权模式 (``weighted=False``)：直接把 TSV 中的 word 列作为 pool（与 lorem 默认的均匀采样行为一致）。
+    * 频率加权模式 (``weighted=True``)：按 demo_lorem_with_la_top50 的方式，用 ``log(1+count)`` 缩放、
+      移位使最小权重变为 1，再按 ``weighted_target_size`` 做线性缩放，四舍五入后 max(1, *) 作为复制次数；
+      lorem 内部会 shuffle 并循环使用 pool，因此同词复制 K 次即以 K/sum(K) 的概率出现。
+
+    返回值为 tuple，避免被 lorem 意外改动；每个 (path, weighted, weighted_target_size) 组合
+    在进程内只加载一次，cache 命中时直接返回。
+    """
+    if not path or not os.path.isfile(path):
+        raise FileNotFoundError(f"random_la_word_pool_path not found: {path}")
+    cache_key = (path, bool(weighted), int(weighted_target_size) if weighted else -1)
+    cached = _LA_WORD_POOL_CACHE.get(cache_key)
+    if cached is not None:
+        return cached
+
+    pairs: list[tuple[str, int]] = []
+    with open(path, "r", encoding="utf-8") as f:
+        first = f.readline()
+        if first and not first.lower().startswith("rank"):
+            # 没有 header，把首行重走一遍；简单处理：把指针 reset 并重解析
+            f.seek(0)
+        for line in f:
+            line = line.rstrip("\n")
+            if not line:
+                continue
+            parts = line.split("\t")
+            if len(parts) < 3:
+                continue
+            word = parts[1].strip()
+            try:
+                count = int(parts[2])
+            except ValueError:
+                continue
+            if not word:
+                continue
+            pairs.append((word, count))
+
+    if not pairs:
+        raise ValueError(f"Empty la word pool loaded from {path}")
+
+    if not weighted:
+        pool = tuple(w for w, _ in pairs)
+    else:
+        log_counts = [math.log1p(c) for _, c in pairs]
+        min_lc = min(log_counts)
+        weights_raw = [lc - min_lc + 1.0 for lc in log_counts]
+        total_raw = sum(weights_raw)
+        scale = float(weighted_target_size) / total_raw if total_raw > 0 else 1.0
+        weights = [max(1, round(w * scale)) for w in weights_raw]
+        expanded: list[str] = []
+        for (word, _), w in zip(pairs, weights):
+            expanded.extend([word] * int(w))
+        pool = tuple(expanded)
+
+    _LA_WORD_POOL_CACHE[cache_key] = pool
+    return pool
+
 from . import torch_functional as VF
 
 
@@ -126,6 +257,14 @@ class RLHFDataset(Dataset):
         use_fake_sentence: bool = False,
         use_random_token: bool = False,
         use_random_ascii: bool = False,
+        use_markovify: bool = False,
+        markovify_model_path: Optional[str] = None,
+        use_random_natural_language: bool = False,
+        random_natural_language_corpus_path: Optional[str] = None,
+        use_random_la_word: bool = False,
+        random_la_word_pool_path: Optional[str] = None,
+        random_la_word_weighted: bool = False,
+        random_la_word_weighted_pool_size: int = 1000,
         faker_locale: Optional[str] = None,
         lorem_word_min: int = 100,
         lorem_word_max: int = 300,
@@ -155,6 +294,14 @@ class RLHFDataset(Dataset):
         self.use_fake_sentence = use_fake_sentence
         self.use_random_token = use_random_token
         self.use_random_ascii = use_random_ascii
+        self.use_markovify = use_markovify
+        self.markovify_model_path = markovify_model_path
+        self.use_random_natural_language = use_random_natural_language
+        self.random_natural_language_corpus_path = random_natural_language_corpus_path
+        self.use_random_la_word = use_random_la_word
+        self.random_la_word_pool_path = random_la_word_pool_path
+        self.random_la_word_weighted = random_la_word_weighted
+        self.random_la_word_weighted_pool_size = random_la_word_weighted_pool_size
         self.lorem_in_middle = lorem_in_middle
         self.lorem_word_min = lorem_word_min
         self.lorem_word_max = lorem_word_max
@@ -163,16 +310,22 @@ class RLHFDataset(Dataset):
         self.multi_style_template_used_names: list[str] = []
         if multi_style_templates and (
             apply_icl or use_lorem or use_fake_sentence or use_random_token or use_random_ascii
+            or use_markovify or use_random_natural_language or use_random_la_word
             or naive_resample or lorem_in_middle
         ):
             raise ValueError(
                 "multi_style_templates=True 与 apply_icl / use_lorem / use_fake_sentence / "
-                "use_random_token / use_random_ascii / naive_resample / lorem_in_middle 互斥，不能同时启用"
+                "use_random_token / use_random_ascii / use_markovify / use_random_natural_language / "
+                "use_random_la_word / naive_resample / lorem_in_middle 互斥，不能同时启用"
             )
-        _prompt_noise_flags = [use_lorem, use_fake_sentence, use_random_token, use_random_ascii, lorem_in_middle]
+        _prompt_noise_flags = [
+            use_lorem, use_fake_sentence, use_random_token, use_random_ascii,
+            use_markovify, use_random_natural_language, use_random_la_word, lorem_in_middle,
+        ]
         if sum(bool(x) for x in _prompt_noise_flags) > 1:
             raise ValueError(
                 "at most one of use_lorem, use_fake_sentence, use_random_token, use_random_ascii, "
+                "use_markovify, use_random_natural_language, use_random_la_word, "
                 "lorem_in_middle can be True"
             )
         if use_lorem and lorem_module is None:
@@ -181,19 +334,48 @@ class RLHFDataset(Dataset):
             raise ImportError("lorem_in_middle=True requires the `python-lorem` package. Install via: pip install python-lorem")
         if use_fake_sentence and FakerFactory is None:
             raise ImportError("use_fake_sentence=True requires the `faker` package. Install via: pip install Faker")
+        if use_markovify:
+            if markovify_module is None:
+                raise ImportError(
+                    "use_markovify=True requires the `markovify` package. Install via: pip install markovify"
+                )
+            if not markovify_model_path:
+                raise ValueError("use_markovify=True requires a non-empty markovify_model_path")
+        if use_random_natural_language and not random_natural_language_corpus_path:
+            raise ValueError(
+                "use_random_natural_language=True requires a non-empty random_natural_language_corpus_path"
+            )
+        if use_random_la_word:
+            if lorem_module is None:
+                raise ImportError(
+                    "use_random_la_word=True requires the `python-lorem` package. Install via: pip install python-lorem"
+                )
+            if not random_la_word_pool_path:
+                raise ValueError(
+                    "use_random_la_word=True requires a non-empty random_la_word_pool_path"
+                )
         self._faker = FakerFactory(faker_locale) if use_fake_sentence else None
+        # 懒加载 markovify 模型：在首次调用 _markovify_prefix 时加载，避免在 main 进程里吃掉 ~1GB 内存
+        self._markovify_model = None
+        # 懒加载随机句子语料：同样避免在 main 进程加载
+        self._random_natural_language_sentences: Optional[list[str]] = None
+        # 懒加载 la word pool
+        self._la_word_pool: Optional[tuple[str, ...]] = None
         if (
-            use_lorem or use_fake_sentence or use_random_token or use_random_ascii or lorem_in_middle
+            use_lorem or use_fake_sentence or use_random_token or use_random_ascii
+            or use_markovify or use_random_la_word or lorem_in_middle
         ) and lorem_word_min > lorem_word_max:
             raise ValueError(f"lorem_word_min ({lorem_word_min}) must be <= lorem_word_max ({lorem_word_max})")
         self._non_special_token_ids_cache: Optional[list[int]] = None
         self.naive_resample = naive_resample
         if naive_resample and (
-            apply_icl or use_lorem or use_fake_sentence or use_random_token or use_random_ascii or lorem_in_middle
+            apply_icl or use_lorem or use_fake_sentence or use_random_token or use_random_ascii
+            or use_markovify or use_random_natural_language or use_random_la_word or lorem_in_middle
         ):
             raise ValueError(
                 "naive_resample=True requires apply_icl=False and all prompt-replacement flags "
-                "(use_lorem, use_fake_sentence, use_random_token, use_random_ascii, lorem_in_middle) to be False"
+                "(use_lorem, use_fake_sentence, use_random_token, use_random_ascii, use_markovify, "
+                "use_random_natural_language, use_random_la_word, lorem_in_middle) to be False"
             )
         self.apply_ground_truth = apply_ground_truth
         self.ground_truth_key = ground_truth_key
@@ -331,6 +513,93 @@ class RLHFDataset(Dataset):
         n = max(1, n)
         return self._faker.sentence(nb_words=n, variable_nb_words=False).strip()
 
+    def _get_markovify_model(self):
+        """懒加载 markovify.Text 模型（每个进程 + path 只加载一次）。"""
+        if self._markovify_model is None:
+            self._markovify_model = _load_markovify_model(self.markovify_model_path)
+        return self._markovify_model
+
+    def _markovify_prefix(self, word_count: Union[int, tuple[int, int]]) -> str:
+        """使用 markovify 语言模型生成随机英文文本。
+
+        词数规则与 lorem 分支一致：
+          * 传入 tuple(lo, hi)：在闭区间内 uniform 随机取 target 词数
+          * 传入 int：直接使用该词数
+
+        逐句采样直到累计词数 >= target。为了让结果对极短句/采样失败鲁棒，
+        每次 ``make_sentence`` 失败（返回 None）用空字符串兜底推进。
+        """
+        if isinstance(word_count, tuple):
+            lo, hi = int(word_count[0]), int(word_count[1])
+            target = random.randint(lo, hi)
+        else:
+            target = int(word_count)
+        target = max(1, target)
+
+        model = self._get_markovify_model()
+        sentences: list[str] = []
+        total = 0
+        # 给一个防卡死的句子数上限（max_tries 大一些，markovify 默认每次内部重试 10 次）
+        for _ in range(max(16, target)):
+            if total >= target:
+                break
+            sent = model.make_sentence(tries=50, test_output=False)
+            if not sent:
+                continue
+            sentences.append(sent)
+            total += len(sent.split())
+
+        if not sentences:
+            # 兜底：极端情况下采样全部失败，回退为 lorem 风格的兜底占位，避免返回空串
+            return "lorem ipsum " * target
+
+        text = " ".join(sentences)
+        # 截断到 target 词数，保持与 lorem 一致（lorem.get_word(count=N) 精确返回 N 个词）
+        words = text.split()
+        if len(words) > target:
+            words = words[:target]
+        return " ".join(words)
+
+    def _get_random_natural_language_sentences(self) -> list[str]:
+        """懒加载语料整段文本列表（每个进程 + path 只加载一次）。"""
+        if self._random_natural_language_sentences is None:
+            self._random_natural_language_sentences = _load_random_natural_language_sentences(
+                self.random_natural_language_corpus_path
+            )
+        return self._random_natural_language_sentences
+
+    def _random_natural_language_prefix(self) -> str:
+        """从给定 JSONL 单语语料中随机挑一行 ``text`` 整段返回，作为 system 前缀。
+
+        语料在抽取阶段已筛过词数（约 100-300 词），这里不做拆句、不做截断、不传词数参数。
+        """
+        return random.choice(self._get_random_natural_language_sentences())
+
+    def _get_la_word_pool(self) -> tuple[str, ...]:
+        """懒加载 la 高频词 pool（每个进程 + (path, weighted, size) 组合只加载一次）。"""
+        if self._la_word_pool is None:
+            self._la_word_pool = _load_la_word_pool(
+                self.random_la_word_pool_path,
+                weighted=self.random_la_word_weighted,
+                weighted_target_size=self.random_la_word_weighted_pool_size,
+            )
+        return self._la_word_pool
+
+    def _random_la_word_prefix(self, word_count: Union[int, tuple[int, int]]) -> str:
+        """使用 la 高频词 pool 代替 lorem 默认词表，生成随机词串。
+
+        词数规则与 lorem 分支一致：
+          * 传入 tuple(lo, hi)：``lorem.get_word(count=(lo, hi), pool=pool)`` 在闭区间内 uniform 随机
+          * 传入 int：``lorem.get_word(count=int, pool=pool)``
+        """
+        assert lorem_module is not None, "lorem module is required for use_random_la_word"
+        pool = self._get_la_word_pool()
+        if isinstance(word_count, tuple):
+            n_arg = (int(word_count[0]), int(word_count[1]))
+        else:
+            n_arg = max(1, int(word_count))
+        return lorem_module.get_word(count=n_arg, pool=pool)
+
     def _build_messages(self, example: dict[str, Any]) -> list[dict[str, Any]]:
         prompt_str: str = example[self.prompt_key]
         if self.format_prompt:
@@ -464,6 +733,9 @@ class RLHFDataset(Dataset):
                 or self.use_fake_sentence
                 or self.use_random_token
                 or self.use_random_ascii
+                or self.use_markovify
+                or self.use_random_natural_language
+                or self.use_random_la_word
                 or self.naive_resample
                 or self.multi_style_templates
                 or self.lorem_in_middle
@@ -558,6 +830,32 @@ class RLHFDataset(Dataset):
                         prefix_word_count = len(system_prefix.split())
                         ascii_system_prefix = self._random_ascii_prefix(prefix_word_count) + "\n"
                         system_prompt = ascii_system_prefix + _tail
+                        messages_with_icl = [
+                            {"role": "system", "content": system_prompt},
+                            {"role": "user", "content": user_prompt},
+                        ]
+                    elif self.use_markovify:
+                        system_prefix = system_prompt[: system_prompt.rfind(_tail)]
+                        prefix_word_count = len(system_prefix.split())
+                        markovify_system_prefix = self._markovify_prefix(prefix_word_count) + "\n"
+                        system_prompt = markovify_system_prefix + _tail
+                        messages_with_icl = [
+                            {"role": "system", "content": system_prompt},
+                            {"role": "user", "content": user_prompt},
+                        ]
+                    elif self.use_random_natural_language:
+                        # 语料已按词数预筛，整段抽取 + 不裁剪；忽略原 ICL 的词数对齐
+                        rnl_system_prefix = self._random_natural_language_prefix() + "\n"
+                        system_prompt = rnl_system_prefix + _tail
+                        messages_with_icl = [
+                            {"role": "system", "content": system_prompt},
+                            {"role": "user", "content": user_prompt},
+                        ]
+                    elif self.use_random_la_word:
+                        system_prefix = system_prompt[: system_prompt.rfind(_tail)]
+                        prefix_word_count = len(system_prefix.split())
+                        la_word_system_prefix = self._random_la_word_prefix(prefix_word_count) + "\n"
+                        system_prompt = la_word_system_prefix + _tail
                         messages_with_icl = [
                             {"role": "system", "content": system_prompt},
                             {"role": "user", "content": user_prompt},
@@ -737,6 +1035,94 @@ class RLHFDataset(Dataset):
                     wc = random.randint(self.lorem_word_min, self.lorem_word_max)
                     ascii_system_prefix = self._random_ascii_prefix(wc) + "\n"
                     system_prompt = ascii_system_prefix + _tail
+                    messages_with_icl = [
+                        {"role": "system", "content": system_prompt},
+                        {"role": "user", "content": user_prompt},
+                    ]
+                    icl_prompt = self.tokenizer.apply_chat_template(
+                        messages_with_icl, add_generation_prompt=True, tokenize=False
+                    )
+                    icl_model_inputs = self.tokenizer([icl_prompt], add_special_tokens=False, return_tensors="pt")
+                    icl_input_ids = icl_model_inputs.pop("input_ids")[0]
+                    icl_attention_mask = icl_model_inputs.pop("attention_mask")[0]
+                    icl_data[icl_idx] = {
+                        "input_ids": icl_input_ids,
+                        "attention_mask": icl_attention_mask,
+                        "prompt": icl_prompt,
+                    }
+
+            elif self.use_markovify:
+                # apply_icl=False：使用 markovify 语言模型生成 system 前缀
+                # 词数规则与 use_lorem 一致（在 [lorem_word_min, lorem_word_max] 内随机）
+                question_text = raw_messages[-1]["content"]
+                user_prompt = question_text
+                if self.format_prompt:
+                    format_prompt = Template(self.format_prompt.strip())
+                    user_prompt = format_prompt.render(content=question_text)
+                _tail = "Please reason step by step, and put your final answer within \\boxed{}."
+                for icl_idx in range(self.num_icl_examples):
+                    markovify_system_prefix = (
+                        self._markovify_prefix((self.lorem_word_min, self.lorem_word_max)) + "\n"
+                    )
+                    system_prompt = markovify_system_prefix + _tail
+                    messages_with_icl = [
+                        {"role": "system", "content": system_prompt},
+                        {"role": "user", "content": user_prompt},
+                    ]
+                    icl_prompt = self.tokenizer.apply_chat_template(
+                        messages_with_icl, add_generation_prompt=True, tokenize=False
+                    )
+                    icl_model_inputs = self.tokenizer([icl_prompt], add_special_tokens=False, return_tensors="pt")
+                    icl_input_ids = icl_model_inputs.pop("input_ids")[0]
+                    icl_attention_mask = icl_model_inputs.pop("attention_mask")[0]
+                    icl_data[icl_idx] = {
+                        "input_ids": icl_input_ids,
+                        "attention_mask": icl_attention_mask,
+                        "prompt": icl_prompt,
+                    }
+
+            elif self.use_random_natural_language:
+                # apply_icl=False：从 JSONL 单语语料中随机抽一行 text 整段作为 system 前缀
+                # 语料已按词数（如 100-300）预筛，这里不再做长度处理 / 不再拆句
+                question_text = raw_messages[-1]["content"]
+                user_prompt = question_text
+                if self.format_prompt:
+                    format_prompt = Template(self.format_prompt.strip())
+                    user_prompt = format_prompt.render(content=question_text)
+                _tail = "Please reason step by step, and put your final answer within \\boxed{}."
+                for icl_idx in range(self.num_icl_examples):
+                    rnl_system_prefix = self._random_natural_language_prefix() + "\n"
+                    system_prompt = rnl_system_prefix + _tail
+                    messages_with_icl = [
+                        {"role": "system", "content": system_prompt},
+                        {"role": "user", "content": user_prompt},
+                    ]
+                    icl_prompt = self.tokenizer.apply_chat_template(
+                        messages_with_icl, add_generation_prompt=True, tokenize=False
+                    )
+                    icl_model_inputs = self.tokenizer([icl_prompt], add_special_tokens=False, return_tensors="pt")
+                    icl_input_ids = icl_model_inputs.pop("input_ids")[0]
+                    icl_attention_mask = icl_model_inputs.pop("attention_mask")[0]
+                    icl_data[icl_idx] = {
+                        "input_ids": icl_input_ids,
+                        "attention_mask": icl_attention_mask,
+                        "prompt": icl_prompt,
+                    }
+
+            elif self.use_random_la_word:
+                # apply_icl=False：用 la 高频词 pool 替换 lorem 默认词表，生成随机词串
+                # 词数规则与 use_lorem 一致（在 [lorem_word_min, lorem_word_max] 内随机）
+                question_text = raw_messages[-1]["content"]
+                user_prompt = question_text
+                if self.format_prompt:
+                    format_prompt = Template(self.format_prompt.strip())
+                    user_prompt = format_prompt.render(content=question_text)
+                _tail = "Please reason step by step, and put your final answer within \\boxed{}."
+                for icl_idx in range(self.num_icl_examples):
+                    la_word_system_prefix = (
+                        self._random_la_word_prefix((self.lorem_word_min, self.lorem_word_max)) + "\n"
+                    )
+                    system_prompt = la_word_system_prefix + _tail
                     messages_with_icl = [
                         {"role": "system", "content": system_prompt},
                         {"role": "user", "content": user_prompt},

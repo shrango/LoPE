@@ -1,5 +1,9 @@
 accelerate
 codetiming
+# https://pypi.org/project/python-lorem/
+# https://pypi.org/project/markovify/
+python-lorem
+markovify
 datasets
 flash-attn>=2.4.3
 liger-kernel

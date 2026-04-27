@@ -133,7 +133,13 @@ def apply_kl_penalty(data: DataProto, kl_ctrl: KLController, kl_penalty="kl"):
     return data, metrics
 
 
-def compute_advantage(data: DataProto, adv_estimator: AdvantageEstimator, gamma: float = 1.0, lam: float = 1.0):
+def compute_advantage(
+    data: DataProto,
+    adv_estimator: AdvantageEstimator,
+    gamma: float = 1.0,
+    lam: float = 1.0,
+    advantage_shaping: bool = False,
+):
     """Compute advantage estimates for policy optimization."""
     adv_inputs = {
         "token_level_rewards": data.batch["token_level_rewards"],
@@ -148,12 +154,12 @@ def compute_advantage(data: DataProto, adv_estimator: AdvantageEstimator, gamma:
     if "reward_baselines" in data.batch:
         adv_inputs["reward_baselines"] = data.batch["reward_baselines"]
 
-    # 若存在 all_rollout_scores_per_uid：对触发 ICL fallback 的 uid，
-    # GRPO 用 base 8 + ICL 24 条 scores 计算 mean/std，避免归一化时低估难题 advantage。
-    # 其余 uid（未触发 fallback）仍走默认 in-batch scores 的归一化路径。
-    all_rollout_scores_per_uid = data.meta_info.get("all_rollout_scores_per_uid", None)
-    if all_rollout_scores_per_uid:
-        adv_inputs["all_rollout_scores_per_uid"] = all_rollout_scores_per_uid
+    # advantage_shaping=True 且 meta 中有 all_rollout_scores_per_uid 时：对触发 ICL fallback 的 uid
+    # 用 base+ICL 完整 scores 算 GRPO 的 mean/std；否则一律用当前 batch 内各 uid 的 scores（标准 GRPO）。
+    if advantage_shaping:
+        all_rollout_scores_per_uid = data.meta_info.get("all_rollout_scores_per_uid", None)
+        if all_rollout_scores_per_uid:
+            adv_inputs["all_rollout_scores_per_uid"] = all_rollout_scores_per_uid
 
     advantages, returns = compute_advantage_return(adv_estimator, **adv_inputs)
     data.batch["advantages"] = advantages
@@ -593,6 +599,9 @@ class RayPPOTrainer:
             self.use_fake_sentence = getattr(self.config.data, "use_fake_sentence", False)
             self.use_random_token = getattr(self.config.data, "use_random_token", False)
             self.use_random_ascii = getattr(self.config.data, "use_random_ascii", False)
+            self.use_markovify = getattr(self.config.data, "use_markovify", False)
+            self.use_random_natural_language = getattr(self.config.data, "use_random_natural_language", False)
+            self.use_random_la_word = getattr(self.config.data, "use_random_la_word", False)
             self.naive_resample = getattr(self.config.data, "naive_resample", False)
             self.multi_style_templates = getattr(self.config.data, "multi_style_templates", False)
             self.lorem_in_middle = getattr(self.config.data, "lorem_in_middle", False)
@@ -602,6 +611,9 @@ class RayPPOTrainer:
                 or self.use_fake_sentence
                 or self.use_random_token
                 or self.use_random_ascii
+                or self.use_markovify
+                or self.use_random_natural_language
+                or self.use_random_la_word
                 or self.naive_resample
                 or self.multi_style_templates
                 or self.lorem_in_middle
@@ -704,9 +716,10 @@ class RayPPOTrainer:
                 num_prompts = num_samples // n
                 overall = overall.reshape(num_prompts, n)      # [num_prompts, n]
 
-                # 记录 base 的 n 条 rollout scores，供后续 ICL fallback 的 prompt 组装完整的 32 条
-                # scores 用于 GRPO advantage 的均值/方差归一化（只对被 fallback 的 prompt 生效）
-                base_overall_per_prompt = overall.copy()        # [num_prompts, n]
+                # 仅 advantage_shaping 时需要保留 base 各条 score，与 ICL scores 拼成完整组供 GRPO 归一化
+                base_overall_per_prompt = (
+                    overall.copy() if self.config.algorithm.advantage_shaping else None
+                )  # [num_prompts, n] or None
 
                 # 默认 reward > 0 视为"答对"
                 prompt_any_correct = (overall > 0).any(axis=1)   # [num_prompts]
@@ -914,27 +927,20 @@ class RayPPOTrainer:
                         rewards = np.asarray(reward_metrics_icl["overall"], dtype=np.float32).reshape(M_eff, icl_rollout_n)
                         overall_icl[:, icl_idx, :] = rewards
 
-                    # 4.5) 记录每个进入 ICL fallback 的 prompt 的 32 条"完整 rollout scores"
-                    #      用途：GRPO advantage 归一化时用 base 8 + ICL 24 算 mean/std，
-                    #           修正 ICL 救活之后被低估的难题 advantage。
-                    #      说明：
-                    #        - prompt_indices[:M] 才是真实的 unsolved prompt（后面是 world_size padding）
-                    #        - general_exploration 时 overall 前 n_main 列才是真实的 base 生成，
-                    #          其余 n - n_main 列是占位槽，这里只取 base_overall_per_prompt 的前 n_main 列
-                    #        - 正常模式下，base 有 n=8 条，ICL 有 num_icl_examples*icl_rollout_n=24 条
-                    uids = new_batch.non_tensor_batch["uid"]
-                    per_uid_scores = new_batch.meta_info.setdefault(
-                        "all_rollout_scores_per_uid", {}
-                    )
-                    base_cols = n_main if general_exploration else n
-                    for i in range(M):
-                        p_idx = int(unsolved_prompt_indices[i])
-                        uid_p = uids[p_idx * n]
-                        base_scores = base_overall_per_prompt[p_idx, :base_cols].astype(np.float32)
-                        icl_scores = overall_icl[i, :, :].reshape(-1).astype(np.float32)
-                        full_scores = np.concatenate([base_scores, icl_scores], axis=0)
-                        # 同一个 uid 理论上只会写入一次；若已存在则覆盖
-                        per_uid_scores[uid_p] = full_scores
+                    # 4.5) advantage_shaping：记录 base + ICL 完整 scores，供 GRPO 对该 uid 用更大一组算 mean/std
+                    if self.config.algorithm.advantage_shaping and base_overall_per_prompt is not None:
+                        uids = new_batch.non_tensor_batch["uid"]
+                        per_uid_scores = new_batch.meta_info.setdefault(
+                            "all_rollout_scores_per_uid", {}
+                        )
+                        base_cols = n_main if general_exploration else n
+                        for i in range(M):
+                            p_idx = int(unsolved_prompt_indices[i])
+                            uid_p = uids[p_idx * n]
+                            base_scores = base_overall_per_prompt[p_idx, :base_cols].astype(np.float32)
+                            icl_scores = overall_icl[i, :, :].reshape(-1).astype(np.float32)
+                            full_scores = np.concatenate([base_scores, icl_scores], axis=0)
+                            per_uid_scores[uid_p] = full_scores
 
                     # 5) 对于每个 prompt，判断有多少个正确的 ICL response，并进行替换
                     device = None
@@ -1391,21 +1397,26 @@ class RayPPOTrainer:
                 new_batch_original_inputs = new_batch.meta_info.get("original_inputs", [])
                 batch_original_inputs = batch.meta_info.get("original_inputs", [])
 
-                # 保存两边的 all_rollout_scores_per_uid（用于 GRPO fallback prompt 的 32 条 scores 归一化）
-                # concat 只保留 data[0].meta_info，所以需要显式合并两侧
-                new_batch_all_rollout_scores = new_batch.meta_info.get("all_rollout_scores_per_uid", {})
-                batch_all_rollout_scores = batch.meta_info.get("all_rollout_scores_per_uid", {})
-
                 # 计算 new_batch 在 concat 后的起始位置
                 batch_size_before_concat = len(batch)
-                
+
+                if self.config.algorithm.advantage_shaping:
+                    # concat 只保留 data[0].meta_info，需显式合并两侧的 all_rollout_scores_per_uid
+                    new_batch_all_rollout_scores = new_batch.meta_info.get(
+                        "all_rollout_scores_per_uid", {}
+                    )
+                    batch_all_rollout_scores = batch.meta_info.get("all_rollout_scores_per_uid", {})
+
                 # 先 concat batch
                 batch = DataProto.concat([batch, new_batch])
 
-                # 合并 all_rollout_scores_per_uid（uid 在跨 batch 间是全局唯一的，直接 dict 合并即可）
-                merged_all_rollout_scores = {**batch_all_rollout_scores, **new_batch_all_rollout_scores}
-                if merged_all_rollout_scores:
-                    batch.meta_info["all_rollout_scores_per_uid"] = merged_all_rollout_scores
+                if self.config.algorithm.advantage_shaping:
+                    merged_all_rollout_scores = {
+                        **batch_all_rollout_scores,
+                        **new_batch_all_rollout_scores,
+                    }
+                    if merged_all_rollout_scores:
+                        batch.meta_info["all_rollout_scores_per_uid"] = merged_all_rollout_scores
                 
                 # 合并 original_inputs：调整 new_batch 的索引偏移
                 if self.has_icl_payload:
@@ -1656,6 +1667,7 @@ class RayPPOTrainer:
                         adv_estimator=self.config.algorithm.adv_estimator,
                         gamma=self.config.algorithm.gamma,
                         lam=self.config.algorithm.lam,
+                        advantage_shaping=self.config.algorithm.advantage_shaping,
                     )
 
                 # update critic

@@ -46,3 +46,8 @@ datasets/
 *.pt
 *.bin
 *.safetensors
+
+# 本仓库：不上传根目录训练启动脚本、辅助工具与临时文件
+/*.sh
+gpu_monitor.py
+Untitled

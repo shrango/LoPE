@@ -66,6 +66,14 @@ class DataConfig:
     use_fake_sentence: bool = False  # 是否用 Faker 生成英文随机句子（四种替换方式最多开一个；词数规则同 lorem_word_*）
     use_random_token: bool = False  # 是否用 tokenizer 词表随机 token（非 special）decode 文本作 system 前缀
     use_random_ascii: bool = False  # 是否用随机可打印 ASCII 作 system 前缀（词数与同 lorem_word_*；字符数=词数*fertility）
+    use_markovify: bool = False  # 是否用 markovify 语言模型生成 system 前缀（与其他 prompt-replacement 标志互斥）
+    markovify_model_path: Optional[str] = None  # markovify.Text.to_json() 导出的 JSON 文件路径，use_markovify=True 时必需
+    use_random_natural_language: bool = False  # 是否从 JSONL 单语语料中随机抽句子作为 system 前缀（与其他 prompt-replacement 标志互斥）
+    random_natural_language_corpus_path: Optional[str] = None  # JSONL 文件路径，每行至少包含 text 字段，use_random_natural_language=True 时必需
+    use_random_la_word: bool = False  # 是否用 la 高频词 pool 替换 lorem 的默认词表（与其他 prompt-replacement 标志互斥）
+    random_la_word_pool_path: Optional[str] = None  # TSV 文件路径（rank\tword\tcount），use_random_la_word=True 时必需
+    random_la_word_weighted: bool = False  # 是否使用频率加权 pool；False=等权 top-N，True=log-scale 加权
+    random_la_word_weighted_pool_size: int = 1000  # random_la_word_weighted=True 时复制扩充后的 pool 目标词元数
     faker_locale: Optional[str] = None  # Faker 语言区域，如 en_US；None 为默认
     lorem_word_min: int = 100  # 纯随机 system 前缀模式（apply_icl=False 时：lorem/fake 为词数界；random_token 为采样 token 数界；random_ascii 为词数界）
     lorem_word_max: int = 300  # 纯随机 system 前缀模式词数/token 上界（含）；apply_icl=True 时仍用于与各替换方式对齐原 ICL 前缀的规则
@@ -146,6 +154,9 @@ class AlgorithmConfig:
     """when True, skip restoring original prompts after fallback/ICL replacement, so training uses the ICL/reference prompt as-is"""
     fallback_with_original_prompt: bool = False
     """when True, use original prompt (instead of ICL/hint prompt) during fallback generation"""
+    advantage_shaping: bool = False
+    """when True (GRPO only), prompts that ran ICL fallback use base+ICL full rollout scores for group mean/std;
+    when False, use standard in-batch scores only (the n kept responses after replacement)."""
 
 
 @dataclass
@@ -246,12 +257,16 @@ class PPOConfig:
                 or self.data.use_fake_sentence
                 or self.data.use_random_token
                 or self.data.use_random_ascii
+                or self.data.use_markovify
+                or self.data.use_random_natural_language
+                or self.data.use_random_la_word
                 or self.data.multi_style_templates
                 or self.data.lorem_in_middle
             ):
                 raise ValueError(
                     "general_exploration 需要 apply_icl=True 或启用任一 "
                     "use_lorem / use_fake_sentence / use_random_token / use_random_ascii / "
+                    "use_markovify / use_random_natural_language / use_random_la_word / "
                     "multi_style_templates / lorem_in_middle"
                 )
             n_icl_slots = self.data.num_icl_examples * self.data.icl_rollout_n
