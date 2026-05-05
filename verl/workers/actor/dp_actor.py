@@ -28,14 +28,13 @@ from torch import nn
 from torch.distributed.fsdp import FullyShardedDataParallel as FSDP
 
 from ...protocol import DataProto, batch_collate
-from ...trainer.core_algos import average_loss, compute_kl, compute_policy_loss, compute_off_policy_loss, compute_safe_policy_loss
+from ...trainer.core_algos import average_loss, compute_kl, compute_policy_loss
 from ...utils import torch_functional as VF
 from ...utils.py_functional import append_to_dict
 from ...utils.seqlen_balancing import prepare_dynamic_batch, restore_dynamic_batch
 from ...utils.ulysses import gather_outputs_and_unpad, ulysses_pad_and_slice_inputs
 from .base import BasePPOActor
 from .config import ActorConfig
-import pdb
 
 try:
     from flash_attn.bert_padding import index_first_axis, pad_input, rearrange, unpad_input
@@ -225,28 +224,11 @@ class DataParallelPPOActor(BasePPOActor):
         select_keys.extend(["old_log_probs", "ref_log_probs", "advantages"])
         non_tensor_select_keys = ["multi_modal_inputs"]
         
-        # 获取rollout_type和prompt_origin_indices（如果存在）
-        # 只有在启用filter_on_policy_token时才需要这些信息
-        filter_on_policy_token = data.meta_info.get("filter_on_policy_token", False)
-        token_filter_lower_bound = data.meta_info.get("token_filter_lower_bound", 0.57)
-        token_filter_upper_bound = data.meta_info.get("token_filter_upper_bound", 1.42)
-        # 只要on_policy_interval_by_pos不是None，就认为需要用pos来过滤
-        # 否则用固定的lower_bound和upper_bound
-        on_policy_interval_by_pos = data.meta_info.get("on_policy_interval_by_pos", None)
         policy_shaping = data.meta_info.get("policy_shaping", False)
         policy_shaping_gamma = data.meta_info.get("policy_shaping_gamma", 0.1)
-        # --- Safe Policy Loss 相关参数 ---
-        use_safe_policy_loss = data.meta_info.get("use_safe_policy_loss", False)
-        safe_policy_region_method = data.meta_info.get("safe_policy_region_method", "suffix")
-        entropy_window_size = data.meta_info.get("entropy_window_size", 64)
-        entropy_rate_threshold = data.meta_info.get("entropy_rate_threshold", None)
-        prefix_loss_type = data.meta_info.get("prefix_loss_type", "mask")
-        trsft_alpha = data.meta_info.get("trsft_alpha", 0.1)
-        has_rollout_type = "rollout_type" in data.non_tensor_batch if filter_on_policy_token or policy_shaping else False
-        rollout_type = data.non_tensor_batch.get("rollout_type", None) if filter_on_policy_token or policy_shaping else None
-        prompt_origin_indices = data.meta_info.get("prompt_origin_indices", {}) if filter_on_policy_token else {}
-        n = data.meta_info.get("n", None) if filter_on_policy_token else None  # 每个prompt的sample数
-        
+        has_rollout_type = "rollout_type" in data.non_tensor_batch if policy_shaping else False
+        rollout_type = data.non_tensor_batch.get("rollout_type", None) if policy_shaping else None
+
         if has_rollout_type:
             non_tensor_select_keys.append("rollout_type")
         
@@ -262,80 +244,6 @@ class DataParallelPPOActor(BasePPOActor):
         # Split to make minibatch iterator for updating the actor
         # See PPO paper for details. https://arxiv.org/abs/1707.06347
         mini_batches = data.select(select_keys, non_tensor_select_keys).split(self.config.global_batch_size_per_device)
-
-        # UPDATE: 改用固定lower_bound和upper_bound
-        # 如果需要IS_ratio过滤，预先计算所有origin samples的IS_ratio并估计每个prompt的正态分布
-        # 注意：由于数据可能被重新排序（_balance_batch），不能直接使用prompt_origin_indices中的索引
-        # 改为通过rollout_type来识别origin samples
-        # prompt_on_policy_intervals = {}  # {prompt_idx: (lower_bound, upper_bound)}
-        # if filter_on_policy_token and has_rollout_type and n is not None:
-        #     # 获取设备信息
-        #     device = next(iter(data.batch.values())).device if data.batch is not None and len(data.batch) > 0 else torch.device("cuda" if torch.cuda.is_available() else "cpu")
-            
-        #     # 通过rollout_type找到所有origin samples，并按prompt分组
-        #     origin_samples_by_prompt = {}  # {prompt_idx: list of sample indices}
-        #     for i in range(len(data)):
-        #         if rollout_type[i] == "origin":
-        #             prompt_idx = i // n
-        #             if prompt_idx not in origin_samples_by_prompt:
-        #                 origin_samples_by_prompt[prompt_idx] = []
-        #             origin_samples_by_prompt[prompt_idx].append(i)
-            
-        #     # 计算所有origin samples的IS_ratio
-        #     origin_is_ratios_by_prompt = {}  # {prompt_idx: list of IS_ratios (flattened tokens)}
-            
-        #     # 遍历每个prompt的origin samples，收集IS_ratio
-            # for prompt_idx, origin_indices in origin_samples_by_prompt.items():
-            #     if len(origin_indices) == 0:
-            #         continue
-                
-            #     # 获取这些origin samples的数据
-            #     origin_samples = data.index_select(origin_indices)
-            #     # 确保数据在正确的设备上
-            #     origin_samples = origin_samples.to(device)
-                
-            #     # 计算log_probs
-            #     origin_model_inputs = {**origin_samples.batch, **origin_samples.non_tensor_batch}
-            #     origin_log_probs = self._forward_micro_batch(origin_model_inputs, temperature=temperature)
-            #     origin_old_log_probs = origin_samples.batch["old_log_probs"]
-            #     origin_response_mask = origin_samples.batch["response_mask"]
-                
-            #     # 计算IS_ratio
-            #     # IS_ratio的问题是第一轮计算origin的IS_ratio永远是1
-            #     # 改用log_probs
-
-            #     origin_is_ratio = torch.exp(origin_log_probs - origin_old_log_probs)  # (num_origin, response_length)
-            #     print(f"origin_is_ratio shape: {origin_is_ratio.shape}")
-                
-            #     # 只收集有效token的IS_ratio（response_mask == 1）
-            #     # 注意：需要detach()因为只需要统计信息，不需要梯度
-            #     origin_is_ratios_flat = origin_is_ratio[origin_response_mask.bool()].detach().cpu().numpy()
-            #     print(f"origin_is_ratios: {origin_is_ratios_flat}")
-
-            #     if len(origin_is_ratios_flat) > 0:
-            #         origin_is_ratios_by_prompt[prompt_idx] = origin_is_ratios_flat
-                    
-            #         # 估计正态分布，计算±3σ区间
-            #         mean = np.mean(origin_is_ratios_flat)
-            #         std = np.std(origin_is_ratios_flat)
-            #         lower_bound = mean - 3 * std
-            #         upper_bound = mean + 3 * std
-            #         prompt_on_policy_intervals[prompt_idx] = (lower_bound, upper_bound)
-
-            #     print(f"prompt_on_policy_intervals: {prompt_on_policy_intervals}")
-            #     origin_log_probs_flat = origin_log_probs[origin_response_mask.bool()].detach().cpu().numpy()
-            #     print(f"origin_log_probs_flat: {origin_log_probs_flat}")
-            #     print(f"origin_log_probs: {origin_log_probs}")
-
-            #     if len(origin_log_probs_flat) > 0:
-            #         origin_is_ratios_by_prompt[prompt_idx] = origin_log_probs_flat
-            #         # 估计正态分布，计算±3σ区间
-            #         mean = np.mean(origin_log_probs_flat)
-            #         std = np.std(origin_log_probs_flat)
-            #         lower_bound = mean - 3 * std
-            #         upper_bound = mean + 3 * std
-            #         prompt_on_policy_intervals[prompt_idx] = (lower_bound, upper_bound)
-            #     print(f"prompt_on_policy_intervals: {prompt_on_policy_intervals}")
 
         metrics = defaultdict(list)
         for _ in range(self.config.ppo_epochs):
@@ -357,7 +265,6 @@ class DataParallelPPOActor(BasePPOActor):
                 if self.rank == 0:
                     micro_batches = tqdm(micro_batches, desc="Update policy", position=2)
 
-                micro_batch_offset = 0
                 for micro_batch in micro_batches:
                     model_inputs = {**micro_batch.batch, **micro_batch.non_tensor_batch}
                     response_mask = model_inputs["response_mask"]
@@ -370,62 +277,27 @@ class DataParallelPPOActor(BasePPOActor):
                     # all return: (bsz, response_length)
                     log_probs = self._forward_micro_batch(model_inputs, temperature=temperature)
                     
-                    micro_batch_size = log_probs.size(0)
-                    micro_batch_offset += micro_batch_size
-                    
-                    # 准备传递给compute_policy_loss的参数
-                    current_global_offset = global_sample_offset + micro_batch_offset - micro_batch_size
-                    micro_rollout_type = model_inputs.get("rollout_type", None) if has_rollout_type else None
-                    
                     # 获取 is_ground_truth 和 real_rollout 标记
                     micro_is_ground_truth = model_inputs.get("is_ground_truth", None)
                     micro_real_rollout = model_inputs.get("real_rollout", None)
                     
-                    # 根据 use_safe_policy_loss 选择不同的 loss 计算函数
 
-                    if use_safe_policy_loss:
-                        pg_loss, pg_metrics = compute_safe_policy_loss(
-                            old_log_probs=old_log_probs,
-                            log_probs=log_probs,
-                            advantages=advantages,
-                            response_mask=response_mask,
-                            clip_ratio_low=self.config.clip_ratio_low,
-                            clip_ratio_high=self.config.clip_ratio_high,
-                            clip_ratio_dual=self.config.clip_ratio_dual,
-                            loss_type=self.config.loss_type,
-                            loss_avg_mode=self.config.loss_avg_mode,
-                            safe_policy_region_method=safe_policy_region_method,
-                            entropy_window_size=entropy_window_size,
-                            entropy_rate_threshold=entropy_rate_threshold,
-                            prefix_loss_type=prefix_loss_type,
-                            trsft_alpha=trsft_alpha,
-                            is_ground_truth=micro_is_ground_truth,
-                            real_rollout=micro_real_rollout,
-                        )
-                    else:
-                        pg_loss, pg_metrics = compute_policy_loss(
-                            old_log_probs=old_log_probs,
-                            log_probs=log_probs,
-                            advantages=advantages,
-                            response_mask=response_mask,
-                            clip_ratio_low=self.config.clip_ratio_low,
-                            clip_ratio_high=self.config.clip_ratio_high,
-                            clip_ratio_dual=self.config.clip_ratio_dual,
-                            loss_type=self.config.loss_type,
-                            loss_avg_mode=self.config.loss_avg_mode,
-                            rollout_is_weights=rollout_is_weights,
-                            filter_on_policy_token=filter_on_policy_token,
-                            token_filter_lower_bound=token_filter_lower_bound,
-                            token_filter_upper_bound=token_filter_upper_bound,
-                            on_policy_interval_by_pos=on_policy_interval_by_pos,
-                            rollout_type=micro_rollout_type if filter_on_policy_token or policy_shaping else None,
-                            n=n if filter_on_policy_token and has_rollout_type else None,
-                            global_sample_offset=current_global_offset if filter_on_policy_token and has_rollout_type else None,
-                            policy_shaping=policy_shaping,
-                            policy_shaping_gamma=policy_shaping_gamma,
-                            is_ground_truth=micro_is_ground_truth,
-                            real_rollout=micro_real_rollout,
-                        )
+                    pg_loss, pg_metrics = compute_policy_loss(
+                        old_log_probs=old_log_probs,
+                        log_probs=log_probs,
+                        advantages=advantages,
+                        response_mask=response_mask,
+                        clip_ratio_low=self.config.clip_ratio_low,
+                        clip_ratio_high=self.config.clip_ratio_high,
+                        clip_ratio_dual=self.config.clip_ratio_dual,
+                        loss_type=self.config.loss_type,
+                        loss_avg_mode=self.config.loss_avg_mode,
+                        rollout_is_weights=rollout_is_weights,
+                        policy_shaping=policy_shaping,
+                        policy_shaping_gamma=policy_shaping_gamma,
+                        is_ground_truth=micro_is_ground_truth,
+                        real_rollout=micro_real_rollout,
+                    )
                     if "ref_log_probs" in model_inputs:
                         ref_log_probs = model_inputs["ref_log_probs"]
                         kld = compute_kl(

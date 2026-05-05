@@ -26,9 +26,9 @@ Instead of just throwing more compute at logit-space exploration (e.g., higher t
 
 ## ✨ Key Findings
 
-- **🎯 Zero-Advantage Recovery.** When all initial rollouts fail, LoPE-perturbed resampling recovers correct trajectories that neither naive resampling nor high-temperature sampling can find.
-- **🧭 Orthogonal Exploration.** On a hard 352-question subset, Lorem-perturbed prompts independently solve **50 unique questions** that other methods miss (see Figure 2).
-- **🧬 Controlled Perplexity is Key.** Among all tested perturbations (random English, ASCII, tokens, multi-style), Lorem Ipsum's perplexity is closest to natural language — strong enough to induce exploration, gentle enough not to corrupt question semantics.
+- **🎯 Zero-Advantage Recovery.** When all initial rollouts fail, LoPE-perturbed resampling recovers correct trajectories that neither naive resampling nor high-temperature sampling can hardly succeed.
+- **🧭 Orthogonal Exploration.** On a hard 352-question subset, Lorem-perturbed prompts independently solve more questions that other methods miss (see Figure 2).
+- **🧬 Controlled Perplexity is Key.** Among all tested prompt space perturbations, the top-performance three use perturbation with lower perplexity (closest to natural language). Their perturbation intensity is sufficient to drive exploration, avoiding detrimental effects of excessive noise.
 - **📈 Consistent Gains.** Average improvement of **+2.79** on Qwen3-1.7B-Base, **+4.62** on Qwen3-4B-Base, and **+6.20** on Qwen2.5-Math-7B across five math benchmarks.
 
 <p align="center">
@@ -145,13 +145,6 @@ Our implementation is built on top of [EasyR1](https://github.com/hiyouga/EasyR1
 ### Training
 
 ```bash
-bash scripts/train_lope.sh \
-    --model Qwen/Qwen3-1.7B-Base \
-    --dataset openr1-math-46k-8192 \
-    --group_size 8 \
-    --resample_size 24
-```
-```
 python3 -m verl.trainer.main \
     config=examples/config.yaml \
     data.max_response_length=8192 \

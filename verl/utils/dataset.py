@@ -252,7 +252,7 @@ class RLHFDataset(Dataset):
         filter_overlong_prompts_workers: int = 16,
         apply_icl: bool = False,
         icl_examples_path: Optional[str] = None,
-        num_icl_examples: int = 5,
+        num_perturbation: int = 5,
         use_lorem: bool = False,
         use_fake_sentence: bool = False,
         use_random_token: bool = False,
@@ -289,7 +289,7 @@ class RLHFDataset(Dataset):
         self.max_pixels = max_pixels
         self.apply_icl = apply_icl
         self.icl_examples = []
-        self.num_icl_examples = num_icl_examples
+        self.num_perturbation = num_perturbation
         self.use_lorem = use_lorem
         self.use_fake_sentence = use_fake_sentence
         self.use_random_token = use_random_token
@@ -382,7 +382,7 @@ class RLHFDataset(Dataset):
 
         # 加载 multi_style_templates（来自 verl/utils/multi_style_templates.py）
         # multi_style_template_names 传入的是 templates 字典的 key，例如 ["abel", "simplerl", ...]
-        # 不传入时默认使用全部 templates，并将 num_icl_examples 对齐到模板数量
+        # 不传入时默认使用全部 templates，并将 num_perturbation 对齐到模板数量
         if multi_style_templates:
             from .multi_style_templates import templates as _multi_style_templates
             if multi_style_template_names is not None and len(multi_style_template_names) > 0:
@@ -395,13 +395,13 @@ class RLHFDataset(Dataset):
                     f"multi_style_template_names 中存在未知模板: {missing}. "
                     f"可用模板: {list(_multi_style_templates.keys())}"
                 )
-            # 自动对齐 num_icl_examples 到实际选中的模板数
-            if self.num_icl_examples != len(selected_names):
+            # 自动对齐 num_perturbation 到实际选中的模板数
+            if self.num_perturbation != len(selected_names):
                 print(
-                    f"[multi_style_templates] overriding num_icl_examples "
-                    f"{self.num_icl_examples} -> {len(selected_names)} to match selected templates"
+                    f"[multi_style_templates] overriding num_perturbation "
+                    f"{self.num_perturbation} -> {len(selected_names)} to match selected templates"
                 )
-                self.num_icl_examples = len(selected_names)
+                self.num_perturbation = len(selected_names)
             self.multi_style_template_used_names = selected_names
             self.multi_style_template_chat_templates = [_multi_style_templates[n] for n in selected_names]
 
@@ -421,7 +421,7 @@ class RLHFDataset(Dataset):
                     # 格式3: Explanation, Details (无示例)
                     self.icl_examples.append(example)
             # 确保 examples 数量与配置一致
-            assert len(self.icl_examples) == self.num_icl_examples, f"Expected {self.num_icl_examples} ICL examples, got {len(self.icl_examples)}"
+            assert len(self.icl_examples) == self.num_perturbation, f"Expected {self.num_perturbation} ICL examples, got {len(self.icl_examples)}"
 
         if "@" in data_path:
             data_path, data_split = data_path.split("@")
@@ -725,7 +725,7 @@ class RLHFDataset(Dataset):
             attention_mask = model_inputs.pop("attention_mask")[0]
 
             # 处理 ICL (In-Context Learning) prompts / 纯 lorem 对照（字段名仍为 icl_* 以便与下游处理一致）
-            # 每个槽位对应一个 prompt，共 num_icl_examples 个
+            # 每个槽位对应一个 prompt，共 num_perturbation 个
             # 命名格式: icl_{idx}_input_ids, icl_{idx}_attention_mask, icl_{idx}_position_ids, raw_icl_{idx}_prompt_ids
             has_icl_payload = (
                 self.apply_icl
@@ -917,7 +917,7 @@ class RLHFDataset(Dataset):
                     user_prompt = format_prompt.render(content=question_text)
                 _tail = "Please reason step by step, and put your final answer within \\boxed{}."
                 # _tail = ""
-                for icl_idx in range(self.num_icl_examples):
+                for icl_idx in range(self.num_perturbation):
                     lorem_system_prefix = (
                         lorem_module.get_word(count=(self.lorem_word_min, self.lorem_word_max)) + "\n"
                     )
@@ -946,7 +946,7 @@ class RLHFDataset(Dataset):
                 question_text = raw_messages[-1]["content"]
                 _tail = "Please reason step by step, and put your final answer within \\boxed{}."
                 system_prompt = _tail
-                for icl_idx in range(self.num_icl_examples):
+                for icl_idx in range(self.num_perturbation):
                     lorem_middle = lorem_module.get_word(count=(self.lorem_word_min, self.lorem_word_max))
                     user_prompt = self._format_prompt_wrap_with_middle(
                         question_text=question_text,
@@ -976,7 +976,7 @@ class RLHFDataset(Dataset):
                     format_prompt = Template(self.format_prompt.strip())
                     user_prompt = format_prompt.render(content=question_text)
                 _tail = "Please reason step by step, and put your final answer within \\boxed{}."
-                for icl_idx in range(self.num_icl_examples):
+                for icl_idx in range(self.num_perturbation):
                     fake_system_prefix = (
                         self._fake_sentence_prefix((self.lorem_word_min, self.lorem_word_max)) + "\n"
                     )
@@ -1004,7 +1004,7 @@ class RLHFDataset(Dataset):
                     format_prompt = Template(self.format_prompt.strip())
                     user_prompt = format_prompt.render(content=question_text)
                 _tail = "Please reason step by step, and put your final answer within \\boxed{}."
-                for icl_idx in range(self.num_icl_examples):
+                for icl_idx in range(self.num_perturbation):
                     n_tok = random.randint(self.lorem_word_min, self.lorem_word_max)
                     token_system_prefix = self._random_token_prefix(n_tok) + "\n"
                     system_prompt = token_system_prefix + _tail
@@ -1031,7 +1031,7 @@ class RLHFDataset(Dataset):
                     format_prompt = Template(self.format_prompt.strip())
                     user_prompt = format_prompt.render(content=question_text)
                 _tail = "Please reason step by step, and put your final answer within \\boxed{}."
-                for icl_idx in range(self.num_icl_examples):
+                for icl_idx in range(self.num_perturbation):
                     wc = random.randint(self.lorem_word_min, self.lorem_word_max)
                     ascii_system_prefix = self._random_ascii_prefix(wc) + "\n"
                     system_prompt = ascii_system_prefix + _tail
@@ -1060,7 +1060,7 @@ class RLHFDataset(Dataset):
                     format_prompt = Template(self.format_prompt.strip())
                     user_prompt = format_prompt.render(content=question_text)
                 _tail = "Please reason step by step, and put your final answer within \\boxed{}."
-                for icl_idx in range(self.num_icl_examples):
+                for icl_idx in range(self.num_perturbation):
                     markovify_system_prefix = (
                         self._markovify_prefix((self.lorem_word_min, self.lorem_word_max)) + "\n"
                     )
@@ -1090,7 +1090,7 @@ class RLHFDataset(Dataset):
                     format_prompt = Template(self.format_prompt.strip())
                     user_prompt = format_prompt.render(content=question_text)
                 _tail = "Please reason step by step, and put your final answer within \\boxed{}."
-                for icl_idx in range(self.num_icl_examples):
+                for icl_idx in range(self.num_perturbation):
                     rnl_system_prefix = self._random_natural_language_prefix() + "\n"
                     system_prompt = rnl_system_prefix + _tail
                     messages_with_icl = [
@@ -1118,7 +1118,7 @@ class RLHFDataset(Dataset):
                     format_prompt = Template(self.format_prompt.strip())
                     user_prompt = format_prompt.render(content=question_text)
                 _tail = "Please reason step by step, and put your final answer within \\boxed{}."
-                for icl_idx in range(self.num_icl_examples):
+                for icl_idx in range(self.num_perturbation):
                     la_word_system_prefix = (
                         self._random_la_word_prefix((self.lorem_word_min, self.lorem_word_max)) + "\n"
                     )
@@ -1140,8 +1140,8 @@ class RLHFDataset(Dataset):
                     }
 
             elif self.naive_resample:
-                # 与主样本相同的 prompt，复制 num_icl_examples 份（tensor 用 clone，避免后续 postprocess 原地写共享存储）
-                for icl_idx in range(self.num_icl_examples):
+                # 与主样本相同的 prompt，复制 num_perturbation 份（tensor 用 clone，避免后续 postprocess 原地写共享存储）
+                for icl_idx in range(self.num_perturbation):
                     icl_data[icl_idx] = {
                         "input_ids": input_ids.clone(),
                         "attention_mask": attention_mask.clone(),
@@ -1157,7 +1157,7 @@ class RLHFDataset(Dataset):
                     format_prompt = Template(self.format_prompt.strip())
                     user_prompt = format_prompt.render(content=question_text)
                 messages_for_template = [{"role": "user", "content": user_prompt}]
-                for icl_idx in range(self.num_icl_examples):
+                for icl_idx in range(self.num_perturbation):
                     chat_template_str = self.multi_style_template_chat_templates[icl_idx]
                     icl_prompt = self.tokenizer.apply_chat_template(
                         messages_for_template,
@@ -1219,7 +1219,7 @@ class RLHFDataset(Dataset):
 
         # 后处理 ICL / lorem 数据
         if has_icl_payload:
-            for icl_idx in range(self.num_icl_examples):
+            for icl_idx in range(self.num_perturbation):
                 icl_input_ids, icl_attention_mask, icl_position_ids = VF.postprocess_data(
                     input_ids=icl_data[icl_idx]["input_ids"],
                     attention_mask=icl_data[icl_idx]["attention_mask"],
@@ -1257,9 +1257,9 @@ class RLHFDataset(Dataset):
             example["ground_truth_text"] = example.pop(self.ground_truth_key)
         # 添加 ICL 数据到 example
         # 命名格式: icl_{idx}_input_ids, icl_{idx}_attention_mask, icl_{idx}_position_ids, raw_icl_{idx}_prompt_ids
-        # idx 从 0 到 num_icl_examples-1
+        # idx 从 0 到 num_perturbation-1
         if has_icl_payload:
-            for icl_idx in range(self.num_icl_examples):
+            for icl_idx in range(self.num_perturbation):
                 example[f"icl_{icl_idx}_input_ids"] = icl_data[icl_idx]["input_ids"]
                 example[f"icl_{icl_idx}_attention_mask"] = icl_data[icl_idx]["attention_mask"]
                 example[f"icl_{icl_idx}_position_ids"] = icl_data[icl_idx]["position_ids"]

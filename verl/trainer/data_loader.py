@@ -43,7 +43,7 @@ def create_dataloader(config: DataConfig, tokenizer: PreTrainedTokenizer, proces
         filter_overlong_prompts_workers=config.filter_overlong_prompts_workers,
         apply_icl=config.apply_icl,
         icl_examples_path=config.icl_examples_path,
-        num_icl_examples=config.num_icl_examples,
+        num_perturbation=config.num_perturbation,
         use_lorem=config.use_lorem,
         use_fake_sentence=config.use_fake_sentence,
         use_random_token=config.use_random_token,

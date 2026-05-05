@@ -59,7 +59,6 @@ from .metrics import (
     compute_timing_metrics,
     reduce_metrics,
 )
-import pdb
 
 class Role(IntEnum):
     """
@@ -225,8 +224,6 @@ class RayPPOTrainer:
         self.resource_pool_manager = resource_pool_manager
         self.use_reward_model = Role.RewardModel in role_worker_mapping
         self.ray_worker_group_cls = ray_worker_group_cls
-
-        self.on_policy_interval_by_pos = None
 
         # define KL control
         if config.algorithm.disable_kl:
@@ -531,9 +528,9 @@ class RayPPOTrainer:
             )
 
             n = self.config.worker.rollout.n
-            num_icl_examples = self.config.data.num_icl_examples
-            icl_rollout_n = self.config.data.icl_rollout_n
-            n_icl_slots = num_icl_examples * icl_rollout_n
+            num_perturbation = self.config.data.num_perturbation
+            rollout_n_per_perturbation = self.config.data.rollout_n_per_perturbation
+            n_icl_slots = num_perturbation * rollout_n_per_perturbation
             general_exploration = getattr(self.config.data, "general_exploration", False)
             n_main = n - n_icl_slots if general_exploration else None
             if general_exploration:
@@ -668,7 +665,7 @@ class RayPPOTrainer:
                     Args:
                         target_batch: 要覆盖的 DataProto（stage_prompt_batch 或 combined_icl_batch）
                         original_indices: 在 new_batch 中的样本索引（list of int）
-                        repeat_factor: 每个 prompt 重复的次数（ICL 时为 num_icl_examples）
+                        repeat_factor: 每个 prompt 重复的次数（ICL 时为 num_perturbation）
                     """
                     original_prompts = new_batch.batch["prompts"][original_indices].clone()
                     prompt_len = original_prompts.shape[-1]
@@ -735,40 +732,23 @@ class RayPPOTrainer:
                 })
                 new_batch.meta_info["fallback_stats"] = fallback_stats
 
-                # 只有在启用filter_on_policy_token时才初始化rollout_type和prompt_origin_indices
-                filter_on_policy_token = getattr(self.config.algorithm, "filter_on_policy_token", False)
-                print(f"filter_on_policy_token: {filter_on_policy_token}")
-                filter_by_suffix_is_ratio = getattr(self.config.algorithm, "filter_by_suffix_is_ratio", False)
-                print(f"filter_by_suffix_is_ratio: {filter_by_suffix_is_ratio}")
-                if filter_on_policy_token or filter_by_suffix_is_ratio:
-                    # 初始化rollout_type：记录哪些sample是origin（没有被替换），哪些是reference（被替换了）
-                    if "rollout_type" not in new_batch.non_tensor_batch:
-                        new_batch.non_tensor_batch["rollout_type"] = np.array(
-                            ["origin"] * len(new_batch), dtype=object
-                        )
-                    # 初始化prompt_origin_indices：记录每个prompt对应的origin samples索引
-                    if "prompt_origin_indices" not in new_batch.meta_info:
-                        new_batch.meta_info["prompt_origin_indices"] = {}
-
                 # ================== ICL Fallback Stage ==================
                 def _icl_fallback_stage(
                     unresolved_mask: np.ndarray,   # [num_prompts]，True 表示当前仍然"全错"的 prompt
                 ):
                     """
                     ICL Fallback Stage:
-                    - 使用 num_icl_examples 个不同的 ICL prompt，每个生成 1 个 response
+                    - 使用 num_perturbation 个不同的 perturbation prompt，每个生成 rollout_n_per_perturbation 个 response
                     - 如果正确数量 >= n (rollout.n)，随机选择 n-1 个替换
                     - 其余逻辑与普通 fallback stage 类似
-                    
+
                     注意区分两个变量：
-                    - n: rollout.n，每个 prompt 在原始 batch 中的 response 数量（可能是 5, 8 等）
-                    - num_icl_examples: ICL examples 的数量（固定为 5，来自 icl_examples_path 文件）
+                    - n: rollout.n，每个 prompt 在原始 batch 中的 response 数量
+                    - num_perturbation: perturbation prompts 的数量
                     """
                     print("----------------------------ICL Fallback Stage----------------------------")
                     stage_name = "icl"
-                    # num_icl_examples: ICL examples 的数量（与 dataset.py 中的配置一致）
-                    # 注意：这与 rollout.n（每个 prompt 的 response 数量）是不同的概念
-                    num_icl_examples = self.config.data.num_icl_examples
+                    num_perturbation = self.config.data.num_perturbation
                     
                     # 1) 当前未解决的 prompt 索引（general_exploration：对所有 prompt 跑 ICL 以替换占位槽）
                     if general_exploration:
@@ -784,17 +764,17 @@ class RayPPOTrainer:
 
                     print(f"----------------------------ICL Stage ({M} prompts, general_exploration={general_exploration})----------------------------")
 
-                    # 2) world_size & padding，让 (prompt 数 * num_icl_examples) 对 world_size 可整除
-                    # 因为 combined_icl_batch 的大小是 M_eff * num_icl_examples
+                    # 2) world_size & padding，让 (prompt 数 * num_perturbation) 对 world_size 可整除
+                    # 因为 combined_icl_batch 的大小是 M_eff * num_perturbation
                     # 注意：必须使用 actor_rollout_ref_wg.world_size，因为 generate_sequences 内部用它来分割数据
                     world_size = self.actor_rollout_ref_wg.world_size
 
                     prompt_indices = unsolved_prompt_indices.copy()
                     if world_size > 1:
-                        # 需要确保 M_eff * num_icl_examples % world_size == 0
-                        # 即 M_eff % (world_size / gcd(world_size, num_icl_examples)) == 0
+                        # 需要确保 M_eff * num_perturbation % world_size == 0
+                        # 即 M_eff % (world_size / gcd(world_size, num_perturbation)) == 0
                         from math import gcd
-                        divisor = world_size // gcd(world_size, num_icl_examples)
+                        divisor = world_size // gcd(world_size, num_perturbation)
                         r = M % divisor
                         if r != 0:
                             pad = divisor - r
@@ -815,7 +795,7 @@ class RayPPOTrainer:
                     shared_non_tensor_keys = ["multi_modal_data"]
                     shared_meta_info_keys = ["min_pixels", "max_pixels", "video_fps"]
                     
-                    for icl_idx in range(num_icl_examples):
+                    for icl_idx in range(num_perturbation):
                         # 从 new_batch 中 pop 出第 icl_idx 个 ICL prompt 的数据
                         icl_pop_batch_keys = [
                             f"icl_{icl_idx}_input_ids",
@@ -863,18 +843,18 @@ class RayPPOTrainer:
                     # 生成重排索引
                     reorder_indices = []
                     for q_idx in range(M_eff):
-                        for icl_idx in range(num_icl_examples):
+                        for icl_idx in range(num_perturbation):
                             # 原索引：icl_idx * M_eff + q_idx
                             reorder_indices.append(icl_idx * M_eff + q_idx)
                     combined_icl_batch = combined_icl_batch_by_icl.index_select(reorder_indices)
                     
                     # 如果 fallback_with_original_prompt，用原始 prompt 覆盖所有 ICL prompt
                     if self.config.algorithm.fallback_with_original_prompt:
-                        _overwrite_with_original_prompt(combined_icl_batch, first_row_indices, repeat_factor=num_icl_examples)
+                        _overwrite_with_original_prompt(combined_icl_batch, first_row_indices, repeat_factor=num_perturbation)
 
                     # 设置每个 ICL prompt 生成的 response 数量
-                    icl_rollout_n = self.config.data.icl_rollout_n
-                    combined_icl_batch.meta_info["n"] = icl_rollout_n
+                    rollout_n_per_perturbation = self.config.data.rollout_n_per_perturbation
+                    combined_icl_batch.meta_info["n"] = rollout_n_per_perturbation
 
                     # vLLM：generate_sequences 内会对 SamplingParams 应用 prompts.meta_info（见 vllm_rollout_spmd.update_sampling_params）
                     resample_temperature = getattr(self.config.data, "resample_temperature", None)
@@ -884,15 +864,15 @@ class RayPPOTrainer:
                     # 一次性生成所有 ICL responses
                     combined_icl_gen_output = self.actor_rollout_ref_wg.generate_sequences(combined_icl_batch)
                     
-                    # 拆分结果：每个 ICL method 有 M_eff * icl_rollout_n 个样本
-                    # generate_sequences 的输出按 question 归类，每个 prompt 有 icl_rollout_n 个 response：
+                    # 拆分结果：每个 ICL method 有 M_eff * rollout_n_per_perturbation 个样本
+                    # generate_sequences 的输出按 question 归类，每个 prompt 有 rollout_n_per_perturbation 个 response：
                     #   q0_icl0_r0..r(rn-1), q0_icl1_r0..r(rn-1), ..., q1_icl0_r0..r(rn-1), ...
                     all_icl_gen_outputs = []
-                    for icl_idx in range(num_icl_examples):
+                    for icl_idx in range(num_perturbation):
                         icl_indices = []
                         for q_idx in range(M_eff):
-                            base = (q_idx * num_icl_examples + icl_idx) * icl_rollout_n
-                            icl_indices.extend(range(base, base + icl_rollout_n))
+                            base = (q_idx * num_perturbation + icl_idx) * rollout_n_per_perturbation
+                            icl_indices.extend(range(base, base + rollout_n_per_perturbation))
                         icl_gen_output = combined_icl_gen_output.index_select(icl_indices)
                         all_icl_gen_outputs.append(icl_gen_output)
                         
@@ -910,21 +890,21 @@ class RayPPOTrainer:
                         print("=" * 30 + "=" * 30)
                     
                     # 4) 计算每个 ICL response 的正确性
-                    # all_icl_gen_outputs: list of DataProto, each with M_eff * icl_rollout_n samples
-                    # overall_icl shape: [M_eff, num_icl_examples, icl_rollout_n]
-                    overall_icl = np.zeros((M_eff, num_icl_examples, icl_rollout_n), dtype=np.float32)
+                    # all_icl_gen_outputs: list of DataProto, each with M_eff * rollout_n_per_perturbation samples
+                    # overall_icl shape: [M_eff, num_perturbation, rollout_n_per_perturbation]
+                    overall_icl = np.zeros((M_eff, num_perturbation, rollout_n_per_perturbation), dtype=np.float32)
                     
                     for icl_idx, icl_gen_output in enumerate(all_icl_gen_outputs):
                         # 需要添加 ground_truth 来计算 reward
-                        # icl_gen_output 有 M_eff * icl_rollout_n 个样本，每 icl_rollout_n 个属于同一个 prompt
+                        # icl_gen_output 有 M_eff * rollout_n_per_perturbation 个样本，每 rollout_n_per_perturbation 个属于同一个 prompt
                         first_row_indices = (prompt_indices * n).tolist()
                         gt_per_prompt = new_batch.non_tensor_batch["ground_truth"][first_row_indices]
-                        icl_gen_output.non_tensor_batch["ground_truth"] = np.repeat(gt_per_prompt, icl_rollout_n)
+                        icl_gen_output.non_tensor_batch["ground_truth"] = np.repeat(gt_per_prompt, rollout_n_per_perturbation)
                         
                         reward_tensor_icl, reward_metrics_icl = ray.get(
                             self.reward_fn.compute_reward.remote(icl_gen_output)
                         )
-                        rewards = np.asarray(reward_metrics_icl["overall"], dtype=np.float32).reshape(M_eff, icl_rollout_n)
+                        rewards = np.asarray(reward_metrics_icl["overall"], dtype=np.float32).reshape(M_eff, rollout_n_per_perturbation)
                         overall_icl[:, icl_idx, :] = rewards
 
                     # 4.5) advantage_shaping：记录 base + ICL 完整 scores，供 GRPO 对该 uid 用更大一组算 mean/std
@@ -951,7 +931,7 @@ class RayPPOTrainer:
                     replace_indices_list = []
                     replace_icl_info_list = []  # (icl_idx, local_idx_in_icl_output)
                     original_input_dicts = []
-                    n_icl_slots_local = num_icl_examples * icl_rollout_n
+                    n_icl_slots_local = num_perturbation * rollout_n_per_perturbation
 
                     if general_exploration:
                         # 占位槽位与 ICL 输出一一对应：global p*n + n_main + t 对应 all_icl_gen_outputs[icl_idx][i*rn+r]
@@ -960,10 +940,10 @@ class RayPPOTrainer:
                                 continue
                             processed_prompts.add(p_idx)
                             for t in range(n_icl_slots_local):
-                                icl_idx = t // icl_rollout_n
-                                r_idx = t % icl_rollout_n
+                                icl_idx = t // rollout_n_per_perturbation
+                                r_idx = t % rollout_n_per_perturbation
                                 global_idx = int(p_idx * n + n_main + t)
-                                local_idx_in_icl = i * icl_rollout_n + r_idx
+                                local_idx_in_icl = i * rollout_n_per_perturbation + r_idx
                                 replace_indices_list.append(global_idx)
                                 replace_icl_info_list.append((int(icl_idx), int(local_idx_in_icl)))
                                 original_input_dict = {}
@@ -982,9 +962,9 @@ class RayPPOTrainer:
                                 continue
                             processed_prompts.add(p_idx)
 
-                            # overall_icl[i] shape: [num_icl_examples, icl_rollout_n]
+                            # overall_icl[i] shape: [num_perturbation, rollout_n_per_perturbation]
                             # 收集所有正确的 (icl_method, rollout_r) 对
-                            correct_mask = (overall_icl[i, :, :] > 0)  # [num_icl_examples, icl_rollout_n]
+                            correct_mask = (overall_icl[i, :, :] > 0)  # [num_perturbation, rollout_n_per_perturbation]
                             correct_pairs = list(zip(*np.nonzero(correct_mask)))  # list of (icl_idx, r_idx)
                             num_correct = len(correct_pairs)
 
@@ -1011,7 +991,7 @@ class RayPPOTrainer:
 
                             for k, (icl_idx, r_idx) in enumerate(selected_pairs):
                                 global_idx = base_global + k  # 替换第 k 个 response
-                                local_idx_in_icl = i * icl_rollout_n + r_idx
+                                local_idx_in_icl = i * rollout_n_per_perturbation + r_idx
 
                                 replace_indices_list.append(global_idx)
                                 replace_icl_info_list.append((int(icl_idx), int(local_idx_in_icl)))
@@ -1071,15 +1051,7 @@ class RayPPOTrainer:
                                         "stage_name": stage_name,
                                     })
                         
-                        # 8) 更新 rollout_type（如果启用）
-                        if (filter_on_policy_token or filter_by_suffix_is_ratio):
-                            if "rollout_type" not in new_batch.non_tensor_batch:
-                                new_batch.non_tensor_batch["rollout_type"] = np.array(
-                                    ["origin"] * len(new_batch), dtype=object
-                                )
-                            new_batch.non_tensor_batch["rollout_type"][replace_indices_np] = "reference"
-                        
-                        # 8.5) 标记 real_rollout 为 False（被替换的样本不是模型自己生成的）
+                        # 8) 标记 real_rollout 为 False（被替换的样本不是模型自己生成的）
                         if "real_rollout" in new_batch.non_tensor_batch:
                             new_batch.non_tensor_batch["real_rollout"][replace_indices_np] = False
                     
@@ -1094,27 +1066,13 @@ class RayPPOTrainer:
                     prompt_any_correct_icl = (overall_icl_final > 0).any(axis=1)
                     new_unresolved_mask = ~prompt_any_correct_icl
                     
-                    # 10) 更新每个prompt对应的origin samples索引
-                    if filter_on_policy_token:
-                        for p_idx in range(num_prompts):
-                            base = int(p_idx * n)
-                            origin_indices_for_prompt = []
-                            for k in range(n):
-                                sample_idx = base + k
-                                if new_batch.non_tensor_batch["rollout_type"][sample_idx] == "origin":
-                                    origin_indices_for_prompt.append(int(sample_idx))
-                            if len(origin_indices_for_prompt) > 0:
-                                new_batch.meta_info["prompt_origin_indices"][p_idx] = origin_indices_for_prompt
-                            elif p_idx in new_batch.meta_info["prompt_origin_indices"]:
-                                del new_batch.meta_info["prompt_origin_indices"][p_idx]
-                    
-                    # 11) 统计信息
+                    # 9) 统计信息
                     fallback_stats = new_batch.meta_info.get("fallback_stats", {})
                     fallback_stats[f"num_all_wrong_after_{stage_name}"] = int(new_unresolved_mask.sum())
                     
                     # 计算 ICL fallback 的正确率
-                    icl_correct_mask = (overall_icl[:M, :, :] > 0)  # [M, num_icl_examples, icl_rollout_n]
-                    num_icl_fallback_samples = M * num_icl_examples * icl_rollout_n
+                    icl_correct_mask = (overall_icl[:M, :, :] > 0)  # [M, num_perturbation, rollout_n_per_perturbation]
+                    num_icl_fallback_samples = M * num_perturbation * rollout_n_per_perturbation
                     num_icl_correct_samples = int(icl_correct_mask.sum())
                     icl_sample_correct_ratio = num_icl_correct_samples / num_icl_fallback_samples if num_icl_fallback_samples > 0 else 0.0
                     
@@ -1261,15 +1219,7 @@ class RayPPOTrainer:
                                     "stage_name": stage_name,
                                 })
                         
-                        # 4) 更新 rollout_type（如果启用）
-                        if (filter_on_policy_token or filter_by_suffix_is_ratio):
-                            if "rollout_type" not in new_batch.non_tensor_batch:
-                                new_batch.non_tensor_batch["rollout_type"] = np.array(
-                                    ["origin"] * len(new_batch), dtype=object
-                                )
-                            new_batch.non_tensor_batch["rollout_type"][replace_indices_np] = "ground_truth"
-                        
-                        # 5) 标记 is_ground_truth（用于 policy loss 中对 ground_truth 的 advantage 进行处理）
+                        # 4) 标记 is_ground_truth（用于 policy loss 中对 ground_truth 的 advantage 进行处理）
                         if "is_ground_truth" not in new_batch.non_tensor_batch:
                             new_batch.non_tensor_batch["is_ground_truth"] = np.zeros(len(new_batch), dtype=bool)
                         new_batch.non_tensor_batch["is_ground_truth"][replace_indices_np] = True
@@ -1680,35 +1630,8 @@ class RayPPOTrainer:
 
                 # update actor                pdb.set_trace()
                 if self.config.trainer.critic_warmup <= self.global_step:
-                    # 将filter_on_policy_token配置传递到batch.meta_info中
-                    batch.meta_info["filter_on_policy_token"] = self.config.algorithm.filter_on_policy_token
-                    batch.meta_info["token_filter_lower_bound"] = self.config.algorithm.token_filter_lower_bound
-                    batch.meta_info["token_filter_upper_bound"] = self.config.algorithm.token_filter_upper_bound
-                    if self.config.algorithm.filter_on_policy_token and self.config.algorithm.interval_by_pos_file is not None:
-                        if self.on_policy_interval_by_pos is None:
-                            # 从interval_by_pos_file中读取interval_by_pos
-                            with open(self.config.algorithm.interval_by_pos_file, "r") as f:
-                                interval_by_pos_dict = json.load(f)
-                            # 数据格式是{"0":[lo0,hi0],"1":[lo1,hi1]}
-                            # 纵向拼起来，变成[[lo0,hi0],[lo1,hi1]]
-                            positions = sorted(interval_by_pos_dict.keys(), key=int)
-                            self.on_policy_interval_by_pos = np.stack(
-                                [interval_by_pos_dict[pos] for pos in positions],
-                                axis=0
-                            )
-                        batch.meta_info["on_policy_interval_by_pos"] = self.on_policy_interval_by_pos
-                    batch.meta_info["filter_by_suffix_is_ratio"] = self.config.algorithm.filter_by_suffix_is_ratio
-                    batch.meta_info["suffix_is_ratio_lower_bound"] = self.config.algorithm.suffix_is_ratio_lower_bound
-                    batch.meta_info["suffix_is_ratio_upper_bound"] = self.config.algorithm.suffix_is_ratio_upper_bound
                     batch.meta_info["policy_shaping"] = self.config.algorithm.policy_shaping
                     batch.meta_info["policy_shaping_gamma"] = self.config.algorithm.policy_shaping_gamma
-                    # --- Safe Policy Loss 相关参数 ---
-                    batch.meta_info["use_safe_policy_loss"] = self.config.algorithm.use_safe_policy_loss
-                    batch.meta_info["safe_policy_region_method"] = self.config.algorithm.safe_policy_region_method
-                    batch.meta_info["entropy_window_size"] = self.config.algorithm.entropy_window_size
-                    batch.meta_info["entropy_rate_threshold"] = self.config.algorithm.entropy_rate_threshold
-                    batch.meta_info["prefix_loss_type"] = self.config.algorithm.prefix_loss_type
-                    batch.meta_info["trsft_alpha"] = self.config.algorithm.trsft_alpha
                     with timer("update_actor", timing_raw):
                         actor_output = self.actor_rollout_ref_wg.update_actor(batch)
 

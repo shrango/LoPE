@@ -57,10 +57,10 @@ class DataConfig:
     filter_overlong_prompts_workers: int = 16
     apply_icl: bool = False  # 是否启用 In-Context Learning fallback
     icl_examples_path: Optional[str] = None  # ICL examples 文件路径
-    num_icl_examples: int = 5  # ICL examples 的数量
-    icl_rollout_n: int = 1  # 每个 ICL prompt 生成的 response 数量
+    num_perturbation: int = 6  # perturbation prompts 的数量
+    rollout_n_per_perturbation: int = 4  # 每个 perturbation prompt 生成的 response 数量
     multi_style_templates: bool = False  # 是否用 verl/utils/multi_style_templates.py 里的 chat template 作为 fallback 多路 prompt（与 apply_icl 互斥）
-    multi_style_template_names: Optional[Tuple[str, ...]] = None  # 可选，指定要使用的模板名称（顺序即 icl_idx 顺序）；为 None 时从 templates 字典按插入顺序取前 num_icl_examples 个
+    multi_style_template_names: Optional[Tuple[str, ...]] = None  # 可选，指定要使用的模板名称（顺序即 icl_idx 顺序）；为 None 时从 templates 字典按插入顺序取前 num_perturbation 个
     use_lorem: bool = False  # 是否用 lorem ipsum 替换 ICL prompt 内容（对比实验用）
     lorem_in_middle: bool = False  # 与 use_lorem 类似，但 lorem 放在 user prompt 的 question 之后，system 只保留 _tail
     use_fake_sentence: bool = False  # 是否用 Faker 生成英文随机句子（四种替换方式最多开一个；词数规则同 lorem_word_*）
@@ -77,8 +77,8 @@ class DataConfig:
     faker_locale: Optional[str] = None  # Faker 语言区域，如 en_US；None 为默认
     lorem_word_min: int = 100  # 纯随机 system 前缀模式（apply_icl=False 时：lorem/fake 为词数界；random_token 为采样 token 数界；random_ascii 为词数界）
     lorem_word_max: int = 300  # 纯随机 system 前缀模式词数/token 上界（含）；apply_icl=True 时仍用于与各替换方式对齐原 ICL 前缀的规则
-    naive_resample: bool = False  # True 时 num_icl_examples 路 icl_* 与主 prompt 相同（需 apply_icl=False 且未启用任一 system 替换标志）
-    general_exploration: bool = False  # True 时主 rollout 只生成 n-num_icl_examples*icl_rollout_n 条，其余槽位由 ICL 占位并在 fallback 中全部替换（需 apply_icl 或任一 use_lorem/use_fake_sentence/use_random_token/use_random_ascii）
+    naive_resample: bool = False  # True 时 num_perturbation 路 icl_* 与主 prompt 相同（需 apply_icl=False 且未启用任一 system 替换标志）
+    general_exploration: bool = False  # True 时主 rollout 只生成 n-num_perturbation*rollout_n_per_perturbation 条，其余槽位由 ICL 占位并在 fallback 中全部替换（需 apply_icl 或任一 use_lorem/use_fake_sentence/use_random_token/use_random_ascii）
     resample_temperature: Optional[float] = None  # ICL fallback 中 generate_sequences 的采样温度；None 表示不覆盖，沿用 worker.rollout 默认
     apply_ground_truth: bool = False  # 是否启用 ground truth 替换功能
     ground_truth_key: str = "solution"  # ground truth 在数据中的 key
@@ -119,37 +119,10 @@ class AlgorithmConfig:
     """filter out low reward samples if online filtering"""
     filter_high: float = 0.99
     """filter out high reward samples if online filtering"""
-    filter_on_policy_token: bool = False
-    """lower bound of the average IS_ratio of the suffix"""
-    token_filter_lower_bound: float = 0.57
-    """upper bound of the average IS_ratio of the suffix"""
-    token_filter_upper_bound: float = 1.42  
-    """file to store the interval of the on-policy IS_ratio"""
-    interval_by_pos_file: Optional[str] = None
-    """filter tokens in reference rollouts based on on-policy IS_ratio interval"""
-    filter_by_suffix_is_ratio: bool = False
-    """train on suffix of a rollout based on the average IS_ratio of the suffix"""
-    suffix_is_ratio_lower_bound: float = 0.97
-    """lower bound of the average IS_ratio of the suffix"""
-    suffix_is_ratio_upper_bound: float = 1.3
-    """upper bound of the average IS_ratio of the suffix"""
     policy_shaping: bool = False
     """apply policy shaping transformation x/(x+gamma) to reference samples' IS_ratio"""
     policy_shaping_gamma: float = 0.1
     """gamma parameter for policy shaping transformation"""
-    # --- Safe Policy Loss 相关配置 ---
-    use_safe_policy_loss: bool = False
-    """use compute_safe_policy_loss instead of compute_policy_loss"""
-    safe_policy_region_method: str = "suffix"
-    """RL区域判定方法: 'suffix' (Suffix Mean动态阈值) 或 'sliding_window' (滑动窗口局部熵率)"""
-    entropy_window_size: int = 64
-    """sliding_window方法的窗口大小"""
-    entropy_rate_threshold: Optional[float] = 0.2
-    """Suffix Mean 过滤阈值，用于 Suffix Mean Reverse Search"""
-    prefix_loss_type: str = "trsft"
-    """前缀的处理方式: 'mask' 或 'trsft'"""
-    trsft_alpha: float = 0.1
-    """TRSFT 的 alpha 阈值"""
     train_with_icl_prompt: bool = False
     """when True, skip restoring original prompts after fallback/ICL replacement, so training uses the ICL/reference prompt as-is"""
     fallback_with_original_prompt: bool = False
@@ -229,7 +202,7 @@ class PPOConfig:
         if self.data.multi_style_templates and self.data.apply_icl:
             raise ValueError("multi_style_templates 与 apply_icl 互斥，不能同时为 True")
 
-        # 自动将 num_icl_examples 对齐到实际启用的 multi_style_templates 数量
+        # 自动将 num_perturbation 对齐到实际启用的 multi_style_templates 数量
         # 不传 multi_style_template_names 时默认使用全部模板
         if self.data.multi_style_templates:
             from ..utils.multi_style_templates import templates as _multi_style_templates
@@ -243,12 +216,12 @@ class PPOConfig:
                     )
             else:
                 n_templates = len(_multi_style_templates)
-            if self.data.num_icl_examples != n_templates:
+            if self.data.num_perturbation != n_templates:
                 print(
-                    f"[multi_style_templates] overriding data.num_icl_examples "
-                    f"{self.data.num_icl_examples} -> {n_templates} to match selected templates"
+                    f"[multi_style_templates] overriding data.num_perturbation "
+                    f"{self.data.num_perturbation} -> {n_templates} to match selected templates"
                 )
-                self.data.num_icl_examples = n_templates
+                self.data.num_perturbation = n_templates
 
         if self.data.general_exploration:
             if not (
@@ -269,10 +242,10 @@ class PPOConfig:
                     "use_markovify / use_random_natural_language / use_random_la_word / "
                     "multi_style_templates / lorem_in_middle"
                 )
-            n_icl_slots = self.data.num_icl_examples * self.data.icl_rollout_n
+            n_icl_slots = self.data.num_perturbation * self.data.rollout_n_per_perturbation
             if n_icl_slots >= self.worker.rollout.n:
                 raise ValueError(
-                    "general_exploration 需要 num_icl_examples*icl_rollout_n < worker.rollout.n，"
+                    "general_exploration 需要 num_perturbation*rollout_n_per_perturbation < worker.rollout.n，"
                     f"当前为 {n_icl_slots} >= {self.worker.rollout.n}"
                 )
             if self.data.naive_resample:
