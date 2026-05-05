@@ -70,18 +70,15 @@ Results on five math reasoning benchmarks (MATH-500, GSM8K, AMC, AIME24, AIME25)
 | **Qwen3-1.7B-Base** | 63.40 | 76.92 | 26.87 | 5.33 | 2.00 | 34.90 |
 | &nbsp;&nbsp;+ GRPO | 64.20 | 82.71 | 27.61 | 6.15 | 4.47 | 37.03 |
 | &nbsp;&nbsp;+ Resample w/ Naive Prompt | 67.00 | 82.18 | 28.36 | 8.70 | 4.58 | 38.16 |
-| &nbsp;&nbsp;+ Resample w/ **LoPE** (w/o Training Signal Shaping) | 68.00 | 83.55 | 33.58 | 7.97 | 5.83 | **39.79** |
-| &nbsp;&nbsp;+ Resample w/ **LoPE** (w/ Training Signal Shaping) | 68.80 | 82.94 | 32.84 | 8.80 | 5.73 | **39.82** |
+| &nbsp;&nbsp;+ Resample w/ **LoPE** | 68.80 | 82.94 | 32.84 | 8.80 | 5.73 | **39.82** |
 | **Qwen3-4B-Base** | 65.80 | 82.71 | 32.84 | 9.38 | 7.24 | 39.59 |
 | &nbsp;&nbsp;+ GRPO | 77.80 | 91.74 | 47.76 | 16.41 | 13.12 | 49.37 |
 | &nbsp;&nbsp;+ Resample w/ Naive Prompt | 79.80 | 92.87 | 45.52 | 14.90 | 11.67 | 48.95 |
-| &nbsp;&nbsp;+ Resample w/ **LoPE** (w/o Training Signal Shaping) | 85.40 | 92.95 | 52.99 | 19.01 | 13.85 | **52.84** |
-| &nbsp;&nbsp;+ Resample w/ **LoPE** (w/ Training Signal Shaping) | 82.60 | 92.95 | 58.21 | 19.90 | 16.27 | **53.99** |
+| &nbsp;&nbsp;+ Resample w/ **LoPE** | 82.60 | 92.95 | 58.21 | 19.90 | 16.27 | **53.99** |
 | **Qwen2.5-Math-7B** | 52.80 | 65.50 | 35.40 | 12.90 | 7.90 | 34.90 |
 | &nbsp;&nbsp;+ GRPO | 78.00 | 85.06 | 47.76 | 17.66 | 9.90 | 47.68 |
 | &nbsp;&nbsp;+ Resample w/ Naive Prompt | 78.20 | 83.02 | 50.00 | 17.19 | 9.17 | 47.52 |
-| &nbsp;&nbsp;+ Resample w/ **LoPE** (w/o Training Signal Shaping) | 77.40 | 86.35 | 47.01 | 15.31 | 10.52 | 47.32 |
-| &nbsp;&nbsp;+ Resample w/ **LoPE** (w/ Training Signal Shaping) | 81.80 | 90.30 | 61.19 | 19.58 | 16.51 | **53.88** |
+| &nbsp;&nbsp;+ Resample w/ **LoPE** | 81.80 | 90.30 | 61.19 | 19.58 | 16.51 | **53.88** |
  
 ### Comparison of Prompt Perturbation Strategies (Qwen3-1.7B-Base)
  
@@ -93,10 +90,10 @@ All perturbation methods below use Training Signal Shaping. The three top perfor
 | *Resample w/o perturbation* | | | | | | |
 | w/ Naive Prompt | 67.00 | 82.18 | 28.36 | 8.70 | 4.58 | 38.16 |
 | w/ Naive Prompt (Temp=1.2) | 64.40 | 82.87 | 31.34 | 8.65 | 4.48 | 38.35 |
-| *Resample w/ perturbation + Training Signal Shaping* | | | | | | |
+| *Resample w/ perturbation* | | | | | | |
 | **w/ LoPE** | 68.80 | 82.94 | 32.84 | 8.80 | 5.73 | **39.82** |
-| w/ Filtered Natural Language (Latin) | 68.80 | 82.71 | 32.84 | 9.32 | 5.57 | 39.85 |
-| w/ Random Latin (Uniform) | 69.40 | 83.32 | 32.09 | 7.19 | 6.35 | 39.67 |
+| w/ Filtered Natural Language (Latin) | 68.80 | 82.71 | 32.84 | 9.32 | 5.57 | **39.85** |
+| w/ Random Latin (Uniform) | 69.40 | 83.32 | 32.09 | 7.19 | 6.35 | **39.67** |
 | w/ Random Latin (3-Gram) | 68.80 | 81.88 | 29.85 | 7.92 | 5.93 | 38.88 |
 | w/ Random English (Uniform) | 67.00 | 83.32 | 28.36 | 8.49 | 5.42 | 38.52 |
 | w/ Random Fake English | 65.80 | 81.96 | 32.09 | 7.50 | 5.42 | 38.55 |
@@ -111,7 +108,7 @@ All perturbation methods below use Training Signal Shaping. The three top perfor
 
 LoPE follows the standard GRPO training loop with three modifications when all initial rollouts fail:
 
-1. **Rollout with Perturbation.** Prepend a random Lorem Ipsum sequence *δ* (100–300 tokens) to the original prompt *p*, then sample *G′* additional responses from $π_{θ_{old}}(o' | δ ⊕ p, q)$.
+1. **Rollout with Perturbation.** Prepend a random Lorem Ipsum sequence *δ* (100–300 tokens) to the original prompt *p*, then sample *G′* additional responses from $\pi_{\theta_{old}}(o' | \delta \oplus p, q)$.
 2. **Regroup Responses.** Replace failed rollouts with successful resampled ones, keeping the group size at *G* and at least one incorrect response so advantages remain non-zero.
 3. **Advantage Estimation with Importance Correction.** Convert resampled responses into pseudo rollouts paired with the naive prompt, and correct the distribution shift via:
 
@@ -131,9 +128,6 @@ cd LoPE
 
 # Install dependencies
 pip install -r requirements.txt
-
-# Install python-lorem for perturbation generation
-pip install python-lorem
 ```
 
 Our implementation is built on top of [EasyR1](https://github.com/hiyouga/EasyR1).
@@ -172,10 +166,6 @@ python3 -m verl.trainer.main \
 
 ### Evaluation
 
-```bash
-bash scripts/eval.sh --model_path checkpoints/lope-qwen3-1.7b
-```
-
 We use [EvalScope](https://github.com/modelscope/evalscope) with sampling temperature 0.6 and top-p 0.95. We report Acc@1 for MATH-500, GSM8K, and AMC, and Mean@32 for AIME24 and AIME25.
 
 ---
@@ -189,7 +179,7 @@ We use [EvalScope](https://github.com/modelscope/evalscope) with sampling temper
 | Rollout temperature | 1.0 |
 | Eval temperature | 0.6 |
 | Eval top-p | 0.95 |
-| Lorem sequence length | 100–300 tokens (uniform) |
+| Lorem sequence length | 100–300 tokens |
 | Max response length | 8,192 tokens |
 | Max input length | 2,048 tokens |
 | KL coefficient | 0 (removed) |
