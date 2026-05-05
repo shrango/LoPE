@@ -20,6 +20,8 @@ Instead of just throwing more compute at logit-space exploration (e.g., higher t
   <img src="assets/figure1_overview.png" width="85%" alt="LoPE Overview"/>
 </p>
 
+> **Figure 1.** During the standard rollout phase, if all *G* responses fail, LoPE prepends a Lorem Ipsum sequence to the prompt and resamples *G′* responses. Successful responses are regrouped with the original failed ones to form a mixed batch of size *G* for policy update.
+
 ---
 
 ## ✨ Key Findings
@@ -33,7 +35,7 @@ Instead of just throwing more compute at logit-space exploration (e.g., higher t
   <img src="assets/figure2_venn.png" width="85%" alt="Venn Diagram of Solved Questions"/>
 </p>
 
-> Venn diagrams of questions successfully resolved (Pass@8) by naive prompting, high-temperature sampling, and Lorem perturbation. LoPE unlocks reasoning paths that pure logit-space methods cannot reach.
+> **Figure 2.** Venn diagrams of questions successfully resolved (Pass@8) by naive prompting, high-temperature sampling, and Lorem perturbation. LoPE unlocks reasoning paths that pure logit-space methods cannot reach.
 
 ---
 
@@ -143,36 +145,11 @@ Our implementation is built on top of [EasyR1](https://github.com/hiyouga/EasyR1
 ### Training
 
 ```bash
-python3 -m verl.trainer.main \
-    config=examples/config.yaml \
-    data.max_response_length=8192 \
-    data.max_prompt_length=2048 \
-    worker.rollout.max_num_batched_tokens=10240 \
-    data.train_files=$OPENR1DATA \
-    data.format_prompt=examples/format_prompt/math.jinja \
-    data.val_files=$MATHTEST \
-    worker.actor.model.model_path=${MODEL_PATH} \
-    trainer.project_name="easy_r1_qwen3_1.7b-base" \
-    trainer.experiment_name=qwen3-1.7b-base_openr1_data_bs128_lorem_test_MATH_wokl \
-    trainer.save_checkpoint_path=$SAVE_DIR \
-    worker.rollout.n=8 \
-    algorithm.use_kl_loss=false \
-    algorithm.disable_kl=true \
-    algorithm.kl_coef=0.0 \
-    data.use_lorem=true \
-    data.lorem_word_min=100 \
-    data.lorem_word_max=300 \
-    data.num_icl_examples=6 \
-    data.icl_rollout_n=4 \
-    trainer.save_freq=5 \
-    trainer.save_limit=-1 \
-    data.rollout_batch_size=128 \
-    data.val_batch_size=1024 \
-    worker.actor.global_batch_size=128 \
-    trainer.total_epochs=1 \
-    trainer.val_before_train=true \
-    trainer.n_gpus_per_node=4 \
-    worker.rollout.gpu_memory_utilization=0.8
+bash scripts/train_lope.sh \
+    --model Qwen/Qwen3-1.7B-Base \
+    --dataset openr1-math-46k-8192 \
+    --group_size 8 \
+    --resample_size 24
 ```
 ```
 python3 -m verl.trainer.main \
@@ -201,6 +178,10 @@ python3 -m verl.trainer.main \
 ```
 
 ### Evaluation
+
+```bash
+bash scripts/eval.sh --model_path checkpoints/lope-qwen3-1.7b
+```
 
 We use [EvalScope](https://github.com/modelscope/evalscope) with sampling temperature 0.6 and top-p 0.95. We report Acc@1 for MATH-500, GSM8K, and AMC, and Mean@32 for AIME24 and AIME25.
 
