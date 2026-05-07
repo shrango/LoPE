@@ -47,10 +47,10 @@ We need a perturbation that is **structurally similar to natural language** but 
 |---|---|---|
 | Question Text (reference) | 4.82 | Natural language (English) |
 | **Lorem Ipsum** ✅ | **25.12** | Near-natural |
-| Natural Language (Latin) | 46.09 | Near-natural |
-| Random Latin (Uniform) | 51.32 | Near-natural |
-| Random English (Uniform) | 85.30 | Near-natural |
-| Random Latin (3-Gram) | 91.45 | Near-natural |
+| Latin Natural Language | 46.09 | Near-natural |
+| Latin Unigram Model | 51.32 | Near-natural |
+| English Unigram Model | 85.30 | Near-natural |
+| Latin 3-Gram Model | 91.45 | Near-natural |
 | Random ASCII | 492.93 | Moderately OOD |
 | Random Fake English | 2,429.9 | Moderately OOD |
 | Random Tokens ❌ | 4.6 × 10⁵ | Severely OOD |
@@ -82,7 +82,7 @@ Results on five math reasoning benchmarks (MATH-500, GSM8K, AMC, AIME24, AIME25)
  
 ### Comparison of Prompt Perturbation Strategies (Qwen3-1.7B-Base)
  
-All perturbation methods below use Training Signal Shaping. The three top performers (**LoPE**, **Filtered Natural Language (Latin)**, **Random Latin (Uniform)**) share the lowest perplexity values among all evaluated perturbations.
+All perturbation methods below use Training Signal Shaping. The three top performers (**LoPE**, **Latin Natural Language**, **Latin Unigram Model**) share the lowest perplexity values among all evaluated perturbations.
  
 | Method | MATH-500 | GSM8K | AMC | AIME24 | AIME25 | **Avg.** |
 |---|:-:|:-:|:-:|:-:|:-:|:-:|
@@ -92,15 +92,15 @@ All perturbation methods below use Training Signal Shaping. The three top perfor
 | w/ Naive Prompt (Temp=1.2) | 64.40 | 82.87 | 31.34 | 8.65 | 4.48 | 38.35 |
 | *Resample w/ perturbation* | | | | | | |
 | **w/ LoPE** | 68.80 | 82.94 | 32.84 | 8.80 | 5.73 | **39.82** |
-| w/ Filtered Natural Language (Latin) | 68.80 | 82.71 | 32.84 | 9.32 | 5.57 | **39.85** |
-| w/ Random Latin (Uniform) | 69.40 | 83.32 | 32.09 | 7.19 | 6.35 | **39.67** |
-| w/ Random Latin (3-Gram) | 68.80 | 81.88 | 29.85 | 7.92 | 5.93 | 38.88 |
-| w/ Random English (Uniform) | 67.00 | 83.32 | 28.36 | 8.49 | 5.42 | 38.52 |
+| w/ Latin Natural Language | 68.80 | 82.71 | 32.84 | 9.32 | 5.57 | **39.85** |
+| w/ Latin Unigram Model | 69.40 | 83.32 | 32.09 | 7.19 | 6.35 | **39.67** |
+| w/ Latin 3-Gram Model | 68.80 | 81.88 | 29.85 | 7.92 | 5.93 | 38.88 |
+| w/ English Unigram Model | 67.00 | 83.32 | 28.36 | 8.49 | 5.42 | 38.52 |
 | w/ Random Fake English | 65.80 | 81.96 | 32.09 | 7.50 | 5.42 | 38.55 |
 | w/ Random ASCII | 66.20 | 82.94 | 28.36 | 8.12 | 5.32 | 38.19 |
 | w/ Random Token | 64.20 | 81.50 | 29.85 | 8.08 | 4.63 | 37.65 |
  
-> **Takeaway:** The most effective prompt-space perturbations share two characteristics: (i) composed of **Latin** words, and (ii) **relatively low perplexity**. English-based perturbations (e.g., Random English Uniform) tend to interfere with the model's original English reasoning context, while extremely high-perplexity perturbations (e.g., Random Token) corrupt the model's input understanding.
+> **Takeaway:** The most effective prompt-space perturbations share two characteristics: (i) composed of **Latin** words, and (ii) **relatively low perplexity**. English-based perturbations (e.g., English Unigram Model) tend to interfere with the model's original English reasoning context, while extremely high-perplexity perturbations (e.g., Random Token) corrupt the model's input understanding.
  
 ---
 
