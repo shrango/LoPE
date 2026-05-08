@@ -204,5 +204,6 @@ If you find LoPE useful in your research, please cite:
 ---
 
 ## 🙏 Acknowledgements
+This research was supported in part by the NVIDIA Academic Grant Program and WashU Ignite Interdisciplinary Grants.
 
 Our code is built upon [EasyR1](https://github.com/hiyouga/EasyR1). We thank the authors of [Qwen](https://github.com/QwenLM/Qwen3), [OpenR1-Math](https://huggingface.co/datasets/open-r1), and [python-lorem](https://github.com/JarryShaw/lorem) for their open-source contributions.
